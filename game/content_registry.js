@@ -2,7 +2,8 @@ import { TOWER_DEFS } from "./towers.js";
 import { ENEMY_TYPES } from "./enemies.js";
 import { MAP_POOL } from "./map.js";
 
-const TOWER_DISPLAY_ORDER = Object.freeze(["archer", "mage", "blizzard", "breaker", "poison", "sniper", "peel"]);
+const preferredTowerOrder = ["archer", "mage", "blizzard", "breaker", "poison", "sniper", "peel"];
+const TOWER_DISPLAY_ORDER = Object.freeze([...new Set([...preferredTowerOrder, ...TOWER_DEFS.map(def => def.id)])]);
 const CAMPAIGN_MAP_CARD_DEFS = Object.freeze([
   Object.freeze({ id: 0, mapIndex: 0, defaultTitle: "Map 1", dynamicMapTitle: true, forcePlayable: true, image: "assets/ARMTD_NEO.png", targetWave: 100, wip: false }),
   Object.freeze({ id: 1, mapIndex: 1, defaultTitle: "Map 2", dynamicMapTitle: true, forcePlayable: false, image: "assets/ARTMTD_XENO.png", targetWave: 105, wip: false }),

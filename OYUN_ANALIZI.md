@@ -1,6 +1,8 @@
 # ARMTD — Oyun ve Kod İncelemesi
 
-7 Eylül 2026 · İnceleme başlangıç sürümü: 0.6.9 · uygulanan son patch: 0.6.33
+7 Eylül 2026 · İnceleme başlangıç sürümü: 0.6.9 · uygulanan son patch: 0.6.34
+
+21 Kasım 2026 tarihli çalışma, on haritanın geometrisini ve kampanya dengesini gerçek savaş motoruyla inceliyor. [12 adımlık plan](DENGE_PLANI.md) · [Ölçümler ve kararlar](DENGE_RAPORU.md)
 
 ## Sonuç ve kapsam
 

@@ -1,8 +1,11 @@
 {
   "name": "armtd",
   "private": true,
-  "version": "0.6.33",
+  "type": "module",
+  "version": "0.6.34",
   "scripts": {
+    "balance": "node tools/balance.mjs",
+    "check:balance": "node tools/check_balance.mjs",
     "check:syntax": "node tools/check_syntax.mjs",
     "check:phase2": "node tools/check_phase2.mjs",
     "phase1:verify": "npm run check:syntax",

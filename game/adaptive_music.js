@@ -517,7 +517,7 @@ function createAdaptiveMusicEngine(){
         } else {
           nextSectionTime = Math.min(nextSectionTime, ctx.currentTime + 0.04);
         }
-        scheduleTick();
+        if (scheduler) scheduleTick();
       }
       else pendingBossBoostSec = Math.max(pendingBossBoostSec, TUNING.boss.bassMinHoldSec);
     }

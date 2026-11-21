@@ -241,7 +241,7 @@ function scaleForWave(base, wave) {
     };
   }
 
-  function wavePlan(wave, { neoCityOpening = false, endlessMode = false } = {}) {
+  function wavePlan(wave, { endlessMode = false } = {}) {
     const parts = capPlanToMax(getRawWavePlan(wave), getWaveEnemyCap(wave));
     if (endlessMode && wave > 100) {
       const growth = 1 + Math.min(0.35, Math.max(0, wave - 105) * 0.005);
@@ -249,7 +249,7 @@ function scaleForWave(base, wave) {
         .map(p => ({ type: p.type, count: Math.max(1, Math.round(p.count * growth)) }));
       return [...escorts, { type: "boss", count: 1 }];
     }
-    if (neoCityOpening && (wave === 6 || wave === 8)) {
+    if (wave === 6 || wave === 8) {
       const runners = parts.find(p => p.type === "runner");
       const column = parts.filter(p => p.type !== "runner");
       if (!runners || !column.length) return parts;
@@ -269,6 +269,7 @@ class WaveState {
     constructor(waveNum, options){
       this.waveNum = waveNum;
       this.plan = wavePlan(waveNum, options);
+      this.modifiers = waveModifiers(waveNum);
       this.cursor = 0;
       this.remainingInPart = this.plan.length ? this.plan[0].count : 0;
 

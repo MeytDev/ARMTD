@@ -57,15 +57,7 @@
     <h3>Game Codex</h3>
     <details class="menuCodexSection" open>
       <summary>Towers</summary>
-      <div class="menuCodexItems">
-        <button type="button" class="menuCodexEntry" data-codex-id="tower:archer"><span>🏹 Archer</span><span class="menuCodexOpenTag">Open</span></button>
-        <button type="button" class="menuCodexEntry" data-codex-id="tower:mage"><span>🔮 Mage</span><span class="menuCodexOpenTag">Open</span></button>
-        <button type="button" class="menuCodexEntry" data-codex-id="tower:blizzard"><span>❄ Blizzard</span><span class="menuCodexOpenTag">Open</span></button>
-        <button type="button" class="menuCodexEntry" data-codex-id="tower:breaker"><span>🔨 Breaker</span><span class="menuCodexOpenTag">Open</span></button>
-        <button type="button" class="menuCodexEntry" data-codex-id="tower:poison"><span>☣ Poison</span><span class="menuCodexOpenTag">Open</span></button>
-        <button type="button" class="menuCodexEntry" data-codex-id="tower:sniper"><span>🎯 Sniper</span><span class="menuCodexOpenTag">Open</span></button>
-        <button type="button" class="menuCodexEntry" data-codex-id="tower:peel"><span>🛰 Peel</span><span class="menuCodexOpenTag">Open</span></button>
-      </div>
+      <div class="menuCodexItems" id="menuTowerEntries"></div>
     </details>
     <details class="menuCodexSection">
       <summary>Mobs</summary>
@@ -368,7 +360,7 @@
 <div id="gameOverBack" class="modalBack">
   <div class="modal gameOverModal">
     <h3>GAME OVER</h3>
-    <div class="sub">Core has fallen.</div>
+    <div class="sub" id="gameOverReason">Core has fallen.</div>
     <div class="winActions">
       <button id="gameOverRestartBtn" class="good">Restart</button>
       <button id="gameOverInspectBtn">Inspect Map</button>
@@ -487,7 +479,7 @@
   window.__armtdBoot = window.__armtdBoot || { ok: false, startedAt: Date.now() };
 </script>
 <!-- Entry point (Live Server: open this index.html) -->
-<script type="module" src="game/main.js?v=0.6.33"></script>
+<script type="module" src="game/main.js?v=0.6.34"></script>
 <script>
   (() => {
     const RETRY_KEY = "armtd_boot_retry_v1";

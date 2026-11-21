@@ -262,19 +262,8 @@ export function initUI(game, options={}){
       gx: t.gx,
       gy: t.gy
     })) return;
-    if(!t.canUpgrade()) return;
-
-    const cost=t.upgradeCost();
-    if(game.gold < cost) return;
-
-    game.gold -= cost;
-    t.spentGold += cost;
-
     const lvlBefore = t.level;
-    t.upgradeBaseStats(false);
-    if (typeof game.notifyTowerLevelChanged === "function") {
-      game.notifyTowerLevelChanged(t, lvlBefore, "manual_upgrade");
-    }
+    if (!game.purchaseTowerLevel(t, "manual_upgrade")) return;
 
     // Normal milestone modal
     if (t.level !== CFG.PRESTIGE_LEVEL && MILESTONES.has(t.level)) {
@@ -408,6 +397,11 @@ export function initUI(game, options={}){
 
   function selectTower(def, btn){
     if (!canUiAction("shop_select_tower", { towerId: def?.id || null })) return;
+    if ((def.size ?? 1) > 1 && !game.map.grid.some((row, y) => row.some((_, x) => game.canPlaceTowerAt(x, y, def)))) {
+      const limitReached = def.id === "peel" && game.towers.some(t => t.def.id === def.id);
+      game.logEvent(limitReached ? "Peel Tower limit: 1"
+        : `No free ${def.size} × ${def.size} site for ${def.name} on this map.`);
+    }
     game.selectedTowerDef=def;
     game.selectedTowerInstance=null;
     game.selectedEnemy=null;
@@ -436,15 +430,8 @@ export function initUI(game, options={}){
     const beforeLevel = t.level;
 
     while (t.level < nextTarget) {
-      const cost=t.upgradeCost();
-      if(game.gold < cost) break;
-      game.gold -= cost;
-      t.spentGold += cost;
       const lvlBefore = t.level;
-      t.upgradeBaseStats(false);
-      if (typeof game.notifyTowerLevelChanged === "function") {
-        game.notifyTowerLevelChanged(t, lvlBefore, "fast_upgrade");
-      }
+      if (!game.purchaseTowerLevel(t, "fast_upgrade")) break;
 
       if (t.level !== CFG.PRESTIGE_LEVEL && MILESTONES.has(t.level)) {
         game.openMilestoneModal(t);

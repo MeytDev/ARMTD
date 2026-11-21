@@ -31,7 +31,7 @@ function headless(){
   const g = Object.create(Game.prototype);
   Object.assign(g, {
     map: new GameMap(MAP_POOL[0]), mapIndex: 0, gold: 150, coreHP: 25, totalKills: 0,
-    towers: [], enemies: [], projectiles: [], effects: [], rings: [], floaters: [], centerQueue: [], deferredActions: [],
+    towers: [], enemies: [], projectiles: [], effects: [], rings: [], attackFlashes: [], _attackFlashCursor: 0, floaters: [], centerQueue: [], deferredActions: [],
     wavesActive: [], currentWave: 0, nextWaveNum: 1, started: false, gameSpeed: 1, gameOver: false,
     endlessMode: false, autoQueueDelay: 0.35, autoQueueTimer: 0, campaignWinShown: false,
     nextWaveNowGoldBuff: {mult:1,timeLeft:0,maxTime:0}, peelUplinkCastsByWave: {}, lastUplinkRewardWave: 0,
@@ -226,7 +226,8 @@ towerIndexProbe.markTowerSpatialIndexDirty();
 towerIndexProbe.rebuildTowerSpatialIndex();
 out.towerSpatialCache = { rebuilds: towerIndexRebuilds, dirtyAfterRebuild: towerIndexProbe._towerSpatialDirty };
 const staticCtx = {
-  clearRect(){}, fillRect(){}, beginPath(){}, moveTo(){}, lineTo(){}, stroke(){}, drawImage(){}
+  clearRect(){}, fillRect(){}, beginPath(){}, moveTo(){}, lineTo(){}, stroke(){}, drawImage(){},
+  save(){}, restore(){}, strokeRect(){}, closePath(){}
 };
 const staticCanvas = { width: 0, height: 0 };
 const staticMapProbe = Object.create(Game.prototype);

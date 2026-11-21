@@ -149,7 +149,13 @@ class GameMap {
   inBounds(x, y) { return x >= 0 && y >= 0 && x < this.w && y < this.h; }
   isPath(x, y) { return this.grid[y][x] === 1; }
   isObstacle(x, y) { return this.grid[y][x] === 2; }
-  isBuildable(x, y) { return this.grid[y][x] === 0; }
+  isBuildable(x, y, { restoreOccupiedEndpoint = false } = {}) {
+    if (this.grid[y][x] !== 0) return false;
+    // Older campaign codes sometimes omitted the path marker at a portal.
+    // An existing save can retain a tower bought there under the old rule.
+    return restoreOccupiedEndpoint || !((x === this.entrance.x && y === this.entrance.y)
+      || (x === this.exit.x && y === this.exit.y));
+  }
 
   isPassable(x, y, start, goal) {
     if (!this.inBounds(x, y)) return false;

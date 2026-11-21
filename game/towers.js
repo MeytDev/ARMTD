@@ -482,6 +482,7 @@ function gainCurve(levelBefore) {
 const TOWER_DEFS = [
     {
       id: "peel",
+      icon: "🛰",
       name: "Peel Tower",
       cost: 11000,
       size: 2,
@@ -498,7 +499,7 @@ const TOWER_DEFS = [
       },
       skill: (tower) => null,
       skillDesc: (tLike) => {
-        return `Core Uplink grants wave-end Core HP and Gold based on cast count. Both rewards scale with Magic.`;
+        return "Each cast banks Core HP and gold until the field clears. Magic increases both rewards. Core HP can exceed its starting value.";
       },
       projectile: { speedTilesPerSec: CFG.PEEL_PROJECTILE_SPEED },
       prestige: { mana: 1000, name: "Linkforge",
@@ -507,6 +508,7 @@ const TOWER_DEFS = [
     },
     {
       id: "archer",
+      icon: "🏹",
       name: "Archer Tower",
       cost: 60,
       autoAttackDesc: (tower) => {
@@ -542,6 +544,7 @@ const TOWER_DEFS = [
     },
     {
       id: "mage",
+      icon: "🔮",
       name: "Mage Tower",
       cost: 85,
       autoAttackDesc: "Magic bolts for steady single-target damage.",
@@ -585,6 +588,7 @@ const TOWER_DEFS = [
     },
     {
       id: "breaker",
+      icon: "🔨",
       name: "Breaker Tower",
       cost: 200,
       autoAttackDesc: (tLike) => `Shreds ${breakerAutoShred(tLike)} armor on hit.`,
@@ -616,6 +620,7 @@ const TOWER_DEFS = [
     },
     {
       id: "blizzard",
+      icon: "❄",
       name: "Blizzard Tower",
       cost: 175,
       autoAttackDesc: "Auto attacks apply slow on hit.",
@@ -649,6 +654,7 @@ const TOWER_DEFS = [
     },
     {
       id: "poison",
+      icon: "☣",
       name: "Poison Tower",
       cost: 250,
       autoAttackDesc: "Each hit applies Poison based on that shot's damage.",
@@ -679,6 +685,7 @@ const TOWER_DEFS = [
     },
     {
       id: "sniper",
+      icon: "🎯",
       name: "Sniper Tower",
       cost: 1500,
       autoAttackDesc: "Very long-range heavy shots. Basic hit briefly applies 100% slow (0.1s).",

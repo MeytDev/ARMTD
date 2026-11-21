@@ -1343,12 +1343,12 @@ const MENU_CODEX_DETAIL_DATA = {
     visual: { kind: "tower", image: "assets/peel.png" },
     rows: [
       { k: "Auto", v: "Fires support links that buff allied towers." },
-      { k: "Skill", v: "Core uplink supports economy and survivability at wave end." },
+      { k: "Skill", v: "Core Uplink banks Core HP and gold until the field is clear. Core HP can grow above its starting value." },
       { k: "Prestige", v: "Randomly grants +1 level to up to 2 other prestige towers." }
     ],
     notes: [
-      "Support identity over direct DPS.",
-      "Value scales with surrounding tower quality."
+      "Place Peel near allies for its first support link. A nearby Prestige Mage can accelerate its mana generation.",
+      "Calling the next wave early delays the payout until all enemies are gone."
     ]
   },
   "mob:runner": {
@@ -1472,9 +1472,7 @@ const MENU_CODEX_DETAIL_DATA = {
 };
 
 const MENU_CODEX_TAB_ORDER = ["tower", "mob", "effect"];
-const MENU_CODEX_TOWER_IDS = CONTENT_REGISTRY.towers.orderedIds
-  .map((id) => `tower:${id}`)
-  .filter((id) => Object.prototype.hasOwnProperty.call(MENU_CODEX_DETAIL_DATA, id));
+const MENU_CODEX_TOWER_IDS = CONTENT_REGISTRY.towers.orderedIds.map(id => `tower:${id}`);
 const MENU_CODEX_IDS_BY_TAB = {
   tower: MENU_CODEX_TOWER_IDS,
   mob: [
@@ -1505,7 +1503,18 @@ const CODEX_MOB_PALETTE = {
 };
 
 function getMenuCodexEntry(id){
-  return MENU_CODEX_DETAIL_DATA[String(id || "").trim()] || null;
+  const key = String(id || "").trim();
+  if (MENU_CODEX_DETAIL_DATA[key]) return MENU_CODEX_DETAIL_DATA[key];
+  const def = key.startsWith("tower:") && CONTENT_REGISTRY.towers.get(key.slice(6));
+  if (!def) return null;
+  const rows = [
+    { k: "Build cost", v: `${def.cost} gold` },
+    { k: "Base range", v: `${def.base.Range} tiles` },
+    { k: "Skill", v: def.skillName },
+    { k: "Prestige", v: def.prestige?.name }
+  ].filter(row => row.v);
+  return { group: "Tower", title: def.name, rows,
+    notes: typeof def.autoAttackDesc === "string" ? [def.autoAttackDesc] : [] };
 }
 
 function getCodexTabFromId(id){
@@ -1754,7 +1763,12 @@ function drawCodexMobPreview(mobType, affixId = null){
 }
 
 function renderMenuCodexVisual(entry){
-  if (!entry?.visual || !menuCodexDetailImage || !menuCodexDetailCanvas) return;
+  if (!menuCodexDetailImage || !menuCodexDetailCanvas) return;
+  if (!entry?.visual) {
+    menuCodexDetailImage.style.display = "none";
+    menuCodexDetailCanvas.style.display = "none";
+    return;
+  }
   const visual = entry.visual;
   if (visual.kind === "tower") {
     menuCodexDetailCanvas.style.display = "none";
@@ -1807,6 +1821,10 @@ function openMenuCodexDetail(id){
 
 function bindMenuCodex(){
   if (menuCodexPanel) {
+    const list = document.getElementById("menuTowerEntries");
+    if (list) list.innerHTML = CONTENT_REGISTRY.towers.orderedList().map(def =>
+      `<button type="button" class="menuCodexEntry" data-codex-id="tower:${escapeHtml(def.id)}"><span>${escapeHtml([def.icon, def.name.replace(/ Tower$/, "")].filter(Boolean).join(" "))}</span><span class="menuCodexOpenTag">Open</span></button>`
+    ).join("");
     menuCodexPanel.addEventListener("click", (ev) => {
       const target = ev.target instanceof Element ? ev.target.closest("[data-codex-id]") : null;
       if (!target) return;
@@ -2815,6 +2833,17 @@ function renderMenuPatchNotes(){
       ]
     }
   ];
+  patchHistory.push({
+    version: "0.6.34",
+    notes: [
+      "Waves 6 and 8 now use the same formations on every map.",
+      "Calling an early wave keeps each enemy's core damage tied to its own wave.",
+      "Calling waves early banks every Core Uplink cast. Each cast pays at its original wave's rate when the field clears.",
+      "Placement previews highlight the path in firing range, or nearby allies for Peel.",
+      "Spawn and core tiles are reserved on every map. Towers already built there in older saves can finish their run.",
+      "The defeat screen identifies the enemy that broke through and how much health it had left."
+    ]
+  });
   const orderedPatchHistory = [...patchHistory].reverse();
   const rewardClaimed = hasStartGoldRewardClaimed();
   const tutorialSteps = Array.isArray(settings?.tutorial?.completedStepIds) ? settings.tutorial.completedStepIds : [];

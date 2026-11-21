@@ -12,6 +12,7 @@ const GAME_UI_IDS = {
   winEndBtn: "winEndBtn",
   winEndlessBtn: "winEndlessBtn",
   gameOverBack: "gameOverBack",
+  gameOverReason: "gameOverReason",
   gameOverRestartBtn: "gameOverRestartBtn",
   gameOverInspectBtn: "gameOverInspectBtn",
   gameOverMainMenuBtn: "gameOverMainMenuBtn",

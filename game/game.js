@@ -105,7 +105,7 @@ const PEEL_BUFF_INFO = {
 
 // Versioning: patch (right) for every update, minor (middle) for big updates.
 // Major (left) is increased manually.
-const GAME_VERSION = "0.6.33";
+const GAME_VERSION = "0.6.34";
 const START_GOLD_BASE = 150;
 const START_GOLD_REWARD_KEY = "armtd_start_gold_reward_v1";
 const START_CORE_HP = 25;
@@ -426,18 +426,18 @@ function normalizeRunSaveData(raw){
 }
 
 class Game {
-    constructor(canvas){
-      this.rngSeed = (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
+    constructor(canvas, { headless = false, seed, mapIndex = 0 } = {}){
+      this.rngSeed = (seed ?? (Date.now() ^ Math.floor(Math.random() * 0xffffffff))) >>> 0;
       setRandomSeed(this.rngSeed);
       this.cv=canvas;
-      this.ctx=canvas.getContext("2d");
+      this.ctx=headless ? null : canvas.getContext("2d");
 
-      this.mapIndex=0;
+      this.mapIndex=mapIndex;
       this.map=new GameMap(getCampaignMapDef(this.mapIndex));
       this.isCustomMapRun = false;
       this.useMapBackground = true;
 
-      this.gold=getStartingGold();
+      this.gold=headless ? START_GOLD_BASE : getStartingGold();
       this.coreHP=START_CORE_HP;
       this.totalKills=0;
 
@@ -501,7 +501,7 @@ class Game {
       this.runClearSec = 0;
       this._lastLoadMigrationFromSchema = null;
       this.runStats = createEmptyRunStats();
-      this.lifetimeStats = readPersistentStats();
+      this.lifetimeStats = headless ? createEmptyRunStats() : readPersistentStats();
       this.runQuestState = createEmptyRunQuestState();
       this._campaignClearNotified = false;
       this.onCampaignClear = null;
@@ -509,6 +509,9 @@ class Game {
       this.tutorialHooks = { canAction: null, onAction: null, shouldUseScriptedSpecialChoice: null };
       this.tutorialSpecialChoicePending = true;
       setEndlessScalingEnabled(false);
+      this._statsFlushTimer = 0;
+      this._statsFlushInterval = headless ? Infinity : 1;
+      if (headless) return;
 
       this.uiAdapter = createGameUiAdapter(document);
       const ui = this.uiAdapter.refs;
@@ -527,8 +530,6 @@ class Game {
       this._selectedPanelObjectNextId = 1;
       // Lifetime stats persistence throttling: avoid localStorage writes on every hit/kill.
       this._statsDirty = false;
-      this._statsFlushTimer = 0;
-      this._statsFlushInterval = 1.0;
       this._perfAcc = {
         sec: 0,
         frames: 0,
@@ -913,6 +914,7 @@ class Game {
     }
 
     resetRunQuestState(){
+      this.fatalLeak = null;
       this.runQuestState = createEmptyRunQuestState();
       this._campaignClearNotified = false;
     }
@@ -1187,7 +1189,7 @@ class Game {
       if (!def) return null;
       const gx = Math.floor(clampNumber(raw.gx, 0, 0));
       const gy = Math.floor(clampNumber(raw.gy, 0, 0));
-      if (!this.canPlaceTowerAt(gx, gy, def)) return null;
+      if (!this.canPlaceTowerAt(gx, gy, def, { restoreOccupiedEndpoint: true })) return null;
 
       const tower = new Tower(def, gx, gy, this);
       tower.level = Math.floor(boundedNumber(raw.level, 1, CFG.PRESTIGE_LEVEL, 1));
@@ -1540,7 +1542,6 @@ class Game {
 
     wavePlanOptions(){
       return {
-        neoCityOpening: this.mapIndex === 0 && !this.isCustomMapRun && !this.endlessMode,
         endlessMode: this.endlessMode
       };
     }
@@ -1666,11 +1667,6 @@ class Game {
     resolvePeelUplinkWaveEnd(){
       const waveNum = this.currentWave;
       if (!waveNum || waveNum <= this.lastUplinkRewardWave) return;
-      const casts = this.getPeelUplinkCasts(waveNum);
-      this.lastUplinkRewardWave = waveNum;
-      delete this.peelUplinkCastsByWave[waveNum];
-      if (casts <= 0) return;
-
       const peel = this.towers.find(t => t.def?.id === "peel");
       const peelMagic = peel
         ? Math.round((peel.magicBonus || 0) * (peel.perks?.magMul ?? 1) * (peel.peelMul?.("mag") ?? 1))
@@ -1678,9 +1674,19 @@ class Game {
       const coreMul = 1 + Math.min(0.90, peelMagic / 1800); // up to +90%
       const goldMul = 1 + Math.min(1.20, peelMagic / 1200); // up to +120%
 
-      const coreGain = Math.max(1, Math.round(casts * coreMul));
-      const goldPerCast = Math.max(12, Math.round(8 + waveNum * 2.2));
-      const goldGain = Math.max(1, Math.round(casts * goldPerCast * goldMul));
+      let casts = 0, coreGain = 0, goldGain = 0;
+      for (const [wave, count] of Object.entries(this.peelUplinkCastsByWave)) {
+        const castWave = Number(wave);
+        if (castWave > waveNum) continue;
+        delete this.peelUplinkCastsByWave[wave];
+        if (!count || castWave <= this.lastUplinkRewardWave) continue;
+        const goldPerCast = Math.max(12, Math.round(8 + castWave * 2.2));
+        casts += count;
+        coreGain += Math.round(count * coreMul);
+        goldGain += Math.round(count * goldPerCast * goldMul);
+      }
+      this.lastUplinkRewardWave = waveNum;
+      if (!casts) return;
       this.coreHP += coreGain;
       this.gold += goldGain;
       if (peel) {
@@ -1718,6 +1724,21 @@ class Game {
         if (d2 < bestD2) { bestD2 = d2; bestIdx = i; }
       }
       return bestIdx;
+    }
+
+    spawnWaveEnemy(typeId, waveNum, waveMods = waveModifiers(waveNum)){
+      if (typeId !== "boss") return this.spawnEnemy(typeId, waveNum, { waveMods });
+      const bigBoss = waveNum % 100 === 0;
+      const totals = computePrevWaveTotals(Math.max(1, waveNum - 1));
+      const scaled = scaleForWave({Armor:40, MR:18, HP:1, Speed:0.62, Wealth:1}, waveNum);
+      const customBossStats = {
+        HP: Math.max(1, Math.round(totals.totalHP)),
+        Speed: bigBoss ? 0.48 : 0.62,
+        Armor: Math.round(scaled.Armor),
+        MR: Math.round(scaled.MR),
+        Wealth: Math.max(50, Math.round(totals.totalWealth * (bigBoss ? Math.max(1, Math.floor(waveNum / 10)) : 1)))
+      };
+      return this.spawnEnemy(typeId, waveNum, { waveMods, customBossStats });
     }
 
     spawnEnemy(typeId, waveNum, opts={}){
@@ -1834,7 +1855,31 @@ class Game {
       if(x<0||y<0||x>=this.map.w||y>=this.map.h) return null;
       return {x,y};
     }
-    canPlaceTowerAt(gx, gy, def){
+    purchaseTower(def, gx, gy){
+      if (!this.canPlaceTowerAt(gx, gy, def) || this.gold < def.cost) return null;
+      const tower = new Tower(def, gx, gy, this);
+      this.gold -= def.cost;
+      this.towers.push(tower);
+      this.markTowerSpatialIndexDirty();
+      this.recordTowerBuilt(def.id, gx, gy);
+      this.evaluateUniqueTowerTypeChallenge();
+      if (def.id === "sniper") this.runQuestState.sniperPurchased = true;
+      return tower;
+    }
+
+    purchaseTowerLevel(tower, source){
+      if (!tower.canUpgrade()) return false;
+      const cost = tower.upgradeCost();
+      if (this.gold < cost) return false;
+      const before = tower.level;
+      this.gold -= cost;
+      tower.spentGold += cost;
+      tower.upgradeBaseStats(false);
+      this.notifyTowerLevelChanged(tower, before, source);
+      return true;
+    }
+
+    canPlaceTowerAt(gx, gy, def, options){
       if(!def) return false;
       if(def.id === "peel" && this.towers.some(t => t.def.id === "peel")) return false;
       const size = def.size ?? 1;
@@ -1842,7 +1887,7 @@ class Game {
         for (let dx=0; dx<size; dx++) {
           const tx = gx + dx;
           const ty = gy + dy;
-          if (!this.map.inBounds(tx, ty) || !this.map.isBuildable(tx, ty)) return false;
+          if (!this.map.inBounds(tx, ty) || !this.map.isBuildable(tx, ty, options)) return false;
           if (this.towerAtGrid(tx, ty)) return false;
         }
       }
@@ -2025,7 +2070,8 @@ class Game {
           gx: g.x,
           gy: g.y
         })) return;
-        if (!this.canPlaceTowerAt(g.x, g.y, this.selectedTowerDef)) {
+        const placedTower = this.purchaseTower(this.selectedTowerDef, g.x, g.y);
+        if (!placedTower) {
           if (this.selectedTowerDef.id === "peel" && this.towers.some(t => t.def.id === "peel")) {
           this.logEvent("Peel Tower limit: 1");
           }
@@ -2033,16 +2079,6 @@ class Game {
           return;
         }
 
-        const cost=this.selectedTowerDef.cost;
-        if(this.gold < cost){ this.refreshUI(true); return; }
-
-        this.gold -= cost;
-        const placedTower = new Tower(this.selectedTowerDef, g.x, g.y, this);
-        this.towers.push(placedTower);
-        this.markTowerSpatialIndexDirty();
-        this.recordTowerBuilt(this.selectedTowerDef.id, g.x, g.y);
-        this.evaluateUniqueTowerTypeChallenge();
-        if (this.selectedTowerDef.id === "sniper") this.runQuestState.sniperPurchased = true;
         this.notifyTutorialAction("canvas_place_tower", {
           towerId: this.selectedTowerDef.id,
           gx: g.x,
@@ -2078,6 +2114,19 @@ class Game {
       this.refreshUI(true);
     }
 
+    rollMilestoneChoices(tower, tier){
+      const scriptedTutorialChoice = this.shouldUseTutorialScriptedSpecialChoice()
+        && !this.isCustomMapRun
+        && this.mapIndex === 0
+        && this.tutorialSpecialChoicePending
+        && tower?.def?.id === "archer"
+        && Number(tower?.level) === 5;
+      const choices = buildChoicesForTower(tower, tier, {
+        forceFixedByCode: scriptedTutorialChoice
+      });
+      return { scriptedTutorialChoice, choices };
+    }
+
     openMilestoneModal(tower){
       const tier = milestoneTier(tower.level);
       if (!tier) return;
@@ -2088,17 +2137,7 @@ class Game {
       });
       this.uiHover.upgrade = false;
       this.uiHover.fast = false;
-
-      const scriptedTutorialChoice = this.shouldUseTutorialScriptedSpecialChoice()
-        && !this.isCustomMapRun
-        && this.mapIndex === 0
-        && this.tutorialSpecialChoicePending
-        && tower?.def?.id === "archer"
-        && Number(tower?.level) === 5;
-      const choices = buildChoicesForTower(tower, tier, {
-        forceFixedByCode: scriptedTutorialChoice
-      });
-
+      const { choices, scriptedTutorialChoice } = this.rollMilestoneChoices(tower, tier);
       openModal(
         `${tower.def.name} - Lv ${tower.level} Special Upgrade <span class="tierBadge">Tier ${tier}</span>`,
         tower.canChooseArcherPath() && tower.level === ARCHER_SPECIALIZATION_LEVEL
@@ -2152,6 +2191,10 @@ class Game {
     }
 
     showGameOverModal(){
+      const reason = this.uiAdapter?.refs?.gameOverReason;
+      if (reason) reason.textContent = this.coreHP <= 0 && this.fatalLeak
+        ? this.fatalLeak
+        : (this.coreHP > 0 ? "Run ended." : "Core has fallen.");
       if (this.gameOverBack) this.gameOverBack.style.display = "flex";
     }
 
@@ -2325,30 +2368,7 @@ class Game {
           const part = w.plan[w.cursor];
           const typeId = part.type;
 
-          const mods = waveModifiers(w.waveNum);
-          let enemy = null;
-
-          if(typeId === "boss"){
-            const isBigBoss = (w.waveNum % 100 === 0);
-            const bossGroupCount = Math.max(1, Math.floor(w.waveNum/10));
-            const wealthMult = isBigBoss ? bossGroupCount : 1.0;
-
-            const prev = Math.max(1, w.waveNum-1);
-            const hpByPrevWave = Math.max(1, Math.round(computePrevWaveTotals(prev).totalHP));
-            let hp = hpByPrevWave;
-            const totals = computePrevWaveTotals(prev);
-            const wealth = Math.max(50, Math.round(totals.totalWealth * wealthMult));
-
-            const scaledBoss = scaleForWave({Armor:40,MR:18,HP:1,Speed:0.62,Wealth:1}, w.waveNum);
-            const armor = Math.round(scaledBoss.Armor);
-            const mr = Math.round(scaledBoss.MR);
-            const speed = isBigBoss ? 0.48 : 0.62;
-
-            const custom = { HP: hp, Speed: speed, Armor: armor, MR: mr, Wealth: wealth };
-            enemy = this.spawnEnemy("boss", w.waveNum, { customBossStats: custom, waveMods: mods });
-          } else {
-            enemy = this.spawnEnemy(typeId, w.waveNum, { waveMods: mods });
-          }
+          const enemy = this.spawnWaveEnemy(typeId, w.waveNum, w.modifiers);
           if (enemy) this.maybeShowModifierIntro(enemy);
 
           w.remainingInPart -= 1;
@@ -2366,9 +2386,13 @@ class Game {
         const wasExit=e.reachedExit;
         e.update(sdt);
         if(!wasExit && e.reachedExit){
-          const hitWave = Math.max(this.currentWave, Math.floor(Number(e.wave) || this.currentWave));
+          const hitWave = Math.max(1, Math.floor(Number(e.wave) || this.currentWave));
           const coreHitMul = hitWave > 105 ? 5 : 1;
           const dmg = (e.isBoss ? 5 : 1) * coreHitMul;
+          if (this.coreHP > 0 && this.coreHP <= dmg) {
+            const name = CONTENT_REGISTRY.enemies.get(e.typeId)?.name ?? "Enemy";
+            this.fatalLeak = `Wave ${hitWave} · ${name} reached the core with ${Math.ceil(100 * e.hp / Math.max(1, e.maxHP))}% health and dealt ${dmg} core damage.`;
+          }
           this.coreHP -= dmg;
           if(this.coreHP<0) this.coreHP=0;
           this.runQuestState.coreDamaged = true;
@@ -3279,6 +3303,34 @@ class Game {
           ctx.beginPath();
           ctx.arc(cx, cy, range*this.tileSize, 0, Math.PI*2);
           ctx.stroke();
+          if (canPlace && d.behavior !== "support") {
+            // Store the real movement path once in tile coordinates. Clipping
+            // also reveals separate passes inside the same firing circle.
+            if (this._previewRoute !== this.map.path) {
+              const path = new Path2D();
+              this.map.path.forEach(({x, y}, i) => {
+                if (i === 0) path.moveTo(x + 0.5, y + 0.5);
+                else path.lineTo(x + 0.5, y + 0.5);
+              });
+              this._previewRoute = this.map.path;
+              this._previewRouteStroke = path;
+            }
+            ctx.save();
+            ctx.clip();
+            ctx.translate(this.offsetX, this.offsetY);
+            ctx.scale(this.tileSize, this.tileSize);
+            ctx.strokeStyle = "rgba(125,211,252,0.82)";
+            ctx.lineWidth = 0.11;
+            ctx.stroke(this._previewRouteStroke);
+            ctx.restore();
+          } else if (canPlace) {
+            ctx.strokeStyle = "rgba(125,211,252,0.82)";
+            for (const ally of this.towers) {
+              if (Math.hypot(ally.x - g.x - sizeTiles/2, ally.y - g.y - sizeTiles/2) > range) continue;
+              ctx.strokeRect(this.offsetX + ally.gx*this.tileSize, this.offsetY + ally.gy*this.tileSize,
+                ally.size*this.tileSize, ally.size*this.tileSize);
+            }
+          }
         }
 
         const ghostTower = { def: d, level: 1, x: g.x + sizeTiles/2, y: g.y + sizeTiles/2, size: sizeTiles };
