@@ -116,7 +116,10 @@ function scaleForWave(base, wave) {
     // Keep wave 50 as baseline pacing: slower before 50, faster after 50.
     // We widen the deviation to make early waves noticeably calmer and late waves denser.
     const BASELINE_WAVE = 50;
-    const EARLY_MAX_INTERVAL = CFG.SPAWN_INTERVAL_BASE * 1.55;
+    // Keep the intentional tutorial slow-downs distinct. The previous cap was
+    // lower than wave 1's composed multiplier, flattening waves 1-10 to one
+    // identical interval.
+    const EARLY_MAX_INTERVAL = CFG.SPAWN_INTERVAL_BASE * 2.50;
     const LATE_MIN_INTERVAL = CFG.SPAWN_INTERVAL_MIN * 0.72;
     if (w < BASELINE_WAVE) {
       const earlyT = (BASELINE_WAVE - w) / (BASELINE_WAVE - 1);
@@ -218,14 +221,16 @@ function scaleForWave(base, wave) {
   }
 
   function getOvercapStatMul(wave){
-    if (wave > 105) {
-      return { hp: 1, armor: 1, mr: 1, speed: 1, pressure: 0 };
-    }
     const rawTotal = planTotal(getRawWavePlan(wave));
-    if (rawTotal <= MAX_ENEMIES_PER_WAVE) {
+    // Endless waves add room for more enemies after 105.  The old hard stop
+    // reset this conversion from overflow count to stat pressure at wave 106,
+    // creating a large effective-HP drop.  Measure overflow against the
+    // active cap instead so the pressure evolves continuously as that cap grows.
+    const waveCap = getWaveEnemyCap(wave);
+    if (rawTotal <= waveCap) {
       return { hp: 1, armor: 1, mr: 1, speed: 1, pressure: 0 };
     }
-    const overflowRatio = (rawTotal - MAX_ENEMIES_PER_WAVE) / MAX_ENEMIES_PER_WAVE;
+    const overflowRatio = (rawTotal - waveCap) / Math.max(1, waveCap);
     const budget = Math.min(7, overflowRatio * 1.8);
     return {
       hp: 1 + budget * OVERCAP_WEIGHTS.hp,
@@ -236,15 +241,34 @@ function scaleForWave(base, wave) {
     };
   }
 
-  function wavePlan(wave) {
-    return capPlanToMax(getRawWavePlan(wave), getWaveEnemyCap(wave));
+  function wavePlan(wave, { neoCityOpening = false, endlessMode = false } = {}) {
+    const parts = capPlanToMax(getRawWavePlan(wave), getWaveEnemyCap(wave));
+    if (endlessMode && wave > 100) {
+      const growth = 1 + Math.min(0.35, Math.max(0, wave - 105) * 0.005);
+      const escorts = parts.filter(p => p.type !== "boss")
+        .map(p => ({ type: p.type, count: Math.max(1, Math.round(p.count * growth)) }));
+      return [...escorts, { type: "boss", count: 1 }];
+    }
+    if (neoCityOpening && (wave === 6 || wave === 8)) {
+      const runners = parts.find(p => p.type === "runner");
+      const column = parts.filter(p => p.type !== "runner");
+      if (!runners || !column.length) return parts;
+      if (wave === 6) return [...column, runners];
+      const scouts = Math.ceil(runners.count / 2);
+      return [
+        { type: "runner", count: scouts },
+        ...column,
+        { type: "runner", count: runners.count - scouts }
+      ].filter(p => p.count > 0);
+    }
+    return parts;
   }
 
   
 class WaveState {
-    constructor(waveNum){
+    constructor(waveNum, options){
       this.waveNum = waveNum;
-      this.plan = wavePlan(waveNum);
+      this.plan = wavePlan(waveNum, options);
       this.cursor = 0;
       this.remainingInPart = this.plan.length ? this.plan[0].count : 0;
 

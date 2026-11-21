@@ -5,33 +5,63 @@ import { CONTENT_REGISTRY } from "./content_registry.js";
 
 const ARCHER_POS = Object.freeze({ x: 7, y: 5 });
 const MAGE_POS = Object.freeze({ x: 8, y: 5 });
+
+function tutorialTowerPosition(game, towerId){
+  const existing = game?.towers?.find(t => t?.def?.id === towerId);
+  if (existing) return { x: existing.gx, y: existing.gy };
+
+  const preferred = towerId === "mage" ? MAGE_POS : ARCHER_POS;
+  const def = CONTENT_REGISTRY.towers.byId.get(towerId) || null;
+  const map = game?.map;
+  const towerState = (game?.towers || [])
+    .map((tower) => `${tower?.def?.id || ""}:${tower?.gx || 0}:${tower?.gy || 0}:${tower?.size ?? tower?.def?.size ?? 1}`)
+    .sort()
+    .join(";");
+  const cacheKey = `${towerId}|${towerState}`;
+  const positionCache = game?._tutorialPositionCache;
+  if (positionCache && positionCache.map === map && positionCache.key === cacheKey) {
+    return { x: positionCache.value.x, y: positionCache.value.y };
+  }
+  const canBuild = (x, y) => {
+    if (!map || !def) return false;
+    const occupied = (game.towers || []).some((tower) => {
+      const size = tower?.size ?? tower?.def?.size ?? 1;
+      return x >= tower.gx && x < tower.gx + size && y >= tower.gy && y < tower.gy + size;
+    });
+    if (occupied) return false;
+    if (typeof game.canPlaceTowerAt === "function") return game.canPlaceTowerAt(x, y, def);
+    return map.inBounds(x, y) && map.isBuildable(x, y);
+  };
+  if (canBuild(preferred.x, preferred.y)) {
+    if (game && typeof game === "object") game._tutorialPositionCache = { map, key: cacheKey, value: preferred };
+    return { x: preferred.x, y: preferred.y };
+  }
+
+  const candidates = [];
+  if (!map) return preferred;
+  for (let y = 0; y < map.h; y += 1) {
+    for (let x = 0; x < map.w; x += 1) {
+      if (!canBuild(x, y)) continue;
+      const dx = x - preferred.x;
+      const dy = y - preferred.y;
+      candidates.push({ x, y, distance: dx * dx + dy * dy });
+    }
+  }
+  candidates.sort((a, b) => a.distance - b.distance || a.y - b.y || a.x - b.x);
+  const result = candidates[0] ? { x: candidates[0].x, y: candidates[0].y } : { x: preferred.x, y: preferred.y };
+  if (game && typeof game === "object") game._tutorialPositionCache = { map, key: cacheKey, value: result };
+  return { x: result.x, y: result.y };
+}
 const TUTORIAL_STEP_ORDER = Object.freeze([
-  "gold_intro",
-  "core_intro",
-  "wave_mobs_intro",
-  "shop_intro",
   "archer_place_intro",
-  "archer_stat_ad",
-  "archer_stat_as",
-  "archer_stat_range",
-  "archer_stat_crit",
-  "archer_stat_magic",
-  "archer_stat_mana_regen",
-  "archer_stat_mana_hit",
-  "archer_power_shot_intro",
-  "archer_upgrade_intro",
   "start_wave_intro",
-  "enemy_select_intro",
-  "enemy_hp_intro",
-  "enemy_armor_intro",
-  "enemy_speed_intro",
-  "enemy_debuff_intro",
-  "enemy_wealth_intro",
-  "mage_place_intro",
-  "mage_level_orb_intro",
-  "fast_upgrade_intro",
-  "special_upgrade_intro"
+  "archer_upgrade_intro"
 ]);
+
+function isTutorialMapEligible(game){
+  if (game?.isCustomMapRun) return false;
+  return Math.max(0, Math.floor(Number(game?.mapIndex) || 0)) === 0;
+}
 
 function clamp(v, min, max){
   return Math.max(min, Math.min(max, v));
@@ -279,6 +309,9 @@ function createTutorialController(options = {}){
   const isMainMenuOpen = (typeof options.isMainMenuOpen === "function")
     ? options.isMainMenuOpen
     : () => false;
+  const onComplete = (typeof options.onComplete === "function")
+    ? options.onComplete
+    : () => {};
 
   const overlay = createOverlay();
   const state = {
@@ -292,7 +325,10 @@ function createTutorialController(options = {}){
     runStartedAtMs: 0,
     rafId: 0,
     fastUpgradeAnchor: null,
-    suppressAdvanceUntil: 0
+    suppressAdvanceUntil: 0,
+    stepDefsCache: null,
+    layoutDirty: true,
+    renderKey: ""
   };
 
   const mageDef = (typeof CONTENT_REGISTRY?.towers?.get === "function")
@@ -303,8 +339,8 @@ function createTutorialController(options = {}){
   const mageCost = Math.max(0, Number(mageDef?.cost) || 0);
   const ctx = {
     game,
-    getArcherTower: () => game.towers.find(t => t?.def?.id === "archer" && t.gx === ARCHER_POS.x && t.gy === ARCHER_POS.y) || null,
-    getMageTower: () => game.towers.find(t => t?.def?.id === "mage" && t.gx === MAGE_POS.x && t.gy === MAGE_POS.y) || null,
+    getArcherTower: () => game.towers.find(t => t?.def?.id === "archer") || null,
+    getMageTower: () => game.towers.find(t => t?.def?.id === "mage") || null,
     getAliveEnemy: () => firstAliveEnemy(game),
     isModalOpen: () => {
       const modalBack = document.getElementById("modalBack");
@@ -339,6 +375,7 @@ function createTutorialController(options = {}){
   function shouldRunTutorial(){
     if (!state.gameplayVisible) return false;
     if (isMainMenuOpen()) return false;
+    if (!isTutorialMapEligible(game)) return false;
     return isEnabled();
   }
 
@@ -359,9 +396,10 @@ function createTutorialController(options = {}){
     game.syncSpeedUI(restore);
   }
 
-  function setTutorialSpecialChoiceMode(active){
-    if (!game || typeof game !== "object") return;
-    game.tutorialForceFixedSpecialChoices = !!active;
+  function shouldUseScriptedSpecialChoice(){
+    // The first scripted Archer choice belongs to the Map 1 tutorial context.
+    // Turning Tutorial off restores normal Star-influenced rarity RNG.
+    return shouldRunTutorial();
   }
 
   function hideOverlay(){
@@ -372,6 +410,10 @@ function createTutorialController(options = {}){
   function showOverlay(){
     overlay.root.classList.add("visible");
     overlay.root.classList.remove("hidden");
+  }
+
+  function markLayoutDirty(){
+    state.layoutDirty = true;
   }
 
   function applyShadeRects(targetRect){
@@ -555,7 +597,8 @@ function createTutorialController(options = {}){
   }
 
   function stepDefs(){
-    return {
+    if (state.stepDefsCache) return state.stepDefsCache;
+    const defs = {
       gold_intro: {
         title: "Gold",
         body: "Gold is your main resource. You earn it from enemy kills and some tower skills. Use it for tower purchases and upgrades.",
@@ -594,42 +637,43 @@ function createTutorialController(options = {}){
         consumeClick: true
       },
       archer_place_intro: {
-        title: "Place Archer Tower",
+        title: "1/3 — Place Archer",
         body: () => (game.selectedTowerDef?.id === "archer")
-          ? "Now place Archer at the highlighted tile."
-          : "Select Archer Tower in the shop first.",
+          ? "Place Archer on the highlighted tile. Tower stats are always available from the selected panel."
+          : "Select Archer from the shop, then place it on the highlighted tile.",
         hint: () => (game.selectedTowerDef?.id === "archer")
           ? "Place Archer on the highlighted tile."
           : "Click Archer in the shop.",
         ready: () => !game.started,
         target: () => {
-          if (game.selectedTowerDef?.id === "archer") return gridRectToViewport(game, ARCHER_POS.x, ARCHER_POS.y, 1, { stretchY: 1.55 });
+          if (game.selectedTowerDef?.id === "archer") { const p = tutorialTowerPosition(game, "archer"); return gridRectToViewport(game, p.x, p.y, 1, { stretchY: 1.55 }); }
           const archerBtn = document.querySelector('#shop .towerBtn[data-theme="archer"]');
           return inflateRect(rectFromElement(archerBtn), 14, 10);
         },
         clickTarget: () => {
-          if (game.selectedTowerDef?.id === "archer") return gridRectToViewport(game, ARCHER_POS.x, ARCHER_POS.y, 1, { stretchY: 1.55 });
+          if (game.selectedTowerDef?.id === "archer") { const p = tutorialTowerPosition(game, "archer"); return gridRectToViewport(game, p.x, p.y, 1, { stretchY: 1.55 }); }
           return rectFromElement(document.querySelector('#shop .towerBtn[data-theme="archer"]'));
         },
         allowAction: (actionId, payload) => {
           if (actionId === "set_game_speed") return false;
           if (actionId === "shop_select_tower") return payload?.towerId === "archer";
           if (actionId === "canvas_place_tower") {
-            return payload?.towerId === "archer" && payload?.gx === ARCHER_POS.x && payload?.gy === ARCHER_POS.y;
+            const p = tutorialTowerPosition(game, "archer");
+            return payload?.towerId === "archer" && payload?.gx === p.x && payload?.gy === p.y;
           }
           return false;
         },
         onAction: (actionId, payload) => (
           actionId === "canvas_place_tower"
           && payload?.towerId === "archer"
-          && payload?.gx === ARCHER_POS.x
-          && payload?.gy === ARCHER_POS.y
+          && payload?.gx === tutorialTowerPosition(game, "archer").x
+          && payload?.gy === tutorialTowerPosition(game, "archer").y
         ),
         onEvent: (eventName, payload) => (
           eventName === GAME_EVENTS.TOWER_BUILT
           && payload?.towerId === "archer"
-          && payload?.gx === ARCHER_POS.x
-          && payload?.gy === ARCHER_POS.y
+          && payload?.gx === tutorialTowerPosition(game, "archer").x
+          && payload?.gy === tutorialTowerPosition(game, "archer").y
         )
       },
       archer_stat_ad: createTowerRowClickStep({
@@ -672,23 +716,23 @@ function createTutorialController(options = {}){
         body: "When Archer mana is full, it uses Power Shot. The next shot deals x2.6 damage. Combined with Crit, it can produce high burst.",
         hint: "Click Archer on the highlighted tile.",
         ready: () => !!ctx.getArcherTower(),
-        target: () => gridRectToViewport(game, ARCHER_POS.x, ARCHER_POS.y, 1, { stretchY: 1.55 }),
+        target: () => { const p = tutorialTowerPosition(game, "archer"); return gridRectToViewport(game, p.x, p.y, 1, { stretchY: 1.55 }); },
         allowAction: (actionId, payload) => (
           actionId === "canvas_select_tower"
           && payload?.towerId === "archer"
-          && payload?.gx === ARCHER_POS.x
-          && payload?.gy === ARCHER_POS.y
+          && payload?.gx === tutorialTowerPosition(game, "archer").x
+          && payload?.gy === tutorialTowerPosition(game, "archer").y
         ),
         onAction: (actionId, payload) => (
           actionId === "canvas_select_tower"
           && payload?.towerId === "archer"
-          && payload?.gx === ARCHER_POS.x
-          && payload?.gy === ARCHER_POS.y
+          && payload?.gx === tutorialTowerPosition(game, "archer").x
+          && payload?.gy === tutorialTowerPosition(game, "archer").y
         )
       },
       archer_upgrade_intro: {
-        title: "Upgrade",
-        body: "Upgrade strengthens this tower and improves all base combat stats.",
+        title: "3/3 — Upgrade",
+        body: "Upgrade Archer once. Detailed stat and ability explanations remain available from the selected panel and Codex.",
         hint: "Use the highlighted Upgrade button.",
         ready: () => {
           const tower = ctx.getArcherTower();
@@ -728,8 +772,8 @@ function createTutorialController(options = {}){
         onEvent: (eventName, payload) => eventName === GAME_EVENTS.TOWER_LEVEL_UP && payload?.towerId === "archer"
       },
       start_wave_intro: {
-        title: "Start",
-        body: "Start begins the wave and sends enemies.",
+        title: "2/3 — Start",
+        body: "Start begins the wave and sends enemies. You can inspect enemy details whenever you want.",
         hint: "Click Start.",
         ready: () => !game.started,
         target: () => document.getElementById("startWaveBtn"),
@@ -774,27 +818,28 @@ function createTutorialController(options = {}){
           return game.gold >= mageCost;
         },
         target: () => {
-          if (game.selectedTowerDef?.id === "mage") return gridRectToViewport(game, MAGE_POS.x, MAGE_POS.y, 1, { stretchY: 1.55 });
+          if (game.selectedTowerDef?.id === "mage") { const p = tutorialTowerPosition(game, "mage"); return gridRectToViewport(game, p.x, p.y, 1, { stretchY: 1.55 }); }
           return document.querySelector('#shop .towerBtn[data-theme="mage"]');
         },
         allowAction: (actionId, payload) => {
           if (actionId === "shop_select_tower") return payload?.towerId === "mage";
           if (actionId === "canvas_place_tower") {
-            return payload?.towerId === "mage" && payload?.gx === MAGE_POS.x && payload?.gy === MAGE_POS.y;
+            const p = tutorialTowerPosition(game, "mage");
+            return payload?.towerId === "mage" && payload?.gx === p.x && payload?.gy === p.y;
           }
           return false;
         },
         onAction: (actionId, payload) => (
           actionId === "canvas_place_tower"
           && payload?.towerId === "mage"
-          && payload?.gx === MAGE_POS.x
-          && payload?.gy === MAGE_POS.y
+          && payload?.gx === tutorialTowerPosition(game, "mage").x
+          && payload?.gy === tutorialTowerPosition(game, "mage").y
         ),
         onEvent: (eventName, payload) => (
           eventName === GAME_EVENTS.TOWER_BUILT
           && payload?.towerId === "mage"
-          && payload?.gx === MAGE_POS.x
-          && payload?.gy === MAGE_POS.y
+          && payload?.gx === tutorialTowerPosition(game, "mage").x
+          && payload?.gy === tutorialTowerPosition(game, "mage").y
         )
       },
       mage_level_orb_intro: {
@@ -806,7 +851,7 @@ function createTutorialController(options = {}){
           if (!mage) return false;
           return (mage.mana || 0) >= 15;
         },
-        target: () => gridRectToViewport(game, MAGE_POS.x, MAGE_POS.y, 1, { stretchY: 1.55 }),
+        target: () => { const p = tutorialTowerPosition(game, "mage"); return gridRectToViewport(game, p.x, p.y, 1, { stretchY: 1.55 }); },
         clickTarget: () => viewportRect(),
         clickToComplete: true,
         consumeClick: true
@@ -843,6 +888,8 @@ function createTutorialController(options = {}){
         onEvent: (eventName) => eventName === GAME_EVENTS.TOWER_SPECIAL_UPGRADE_CHOSEN
       }
     };
+    state.stepDefsCache = defs;
+    return defs;
   }
 
   function deactivateActiveStep(){
@@ -854,9 +901,9 @@ function createTutorialController(options = {}){
     state.activeStep = null;
     state.activeTargetRect = null;
     state.activeClickRect = null;
+    state.layoutDirty = true;
     hideOverlay();
     setTutorialPause(false);
-    setTutorialSpecialChoiceMode(false);
   }
 
   function activateStep(stepId, step){
@@ -865,6 +912,7 @@ function createTutorialController(options = {}){
     deactivateActiveStep();
     state.activeStepId = stepId;
     state.activeStep = step;
+    state.layoutDirty = true;
     if (typeof step.onActivate === "function") {
       try { step.onActivate(ctx); } catch (_) {}
     }
@@ -888,13 +936,35 @@ function createTutorialController(options = {}){
     if (typeof step.onRender === "function") {
       try { step.onRender(ctx); } catch (_) {}
     }
+    if (!state.layoutDirty) return;
     const target = toRect(typeof step.target === "function" ? step.target(ctx) : step.target);
     const clickTarget = toRect(typeof step.clickTarget === "function" ? step.clickTarget(ctx) : (step.clickTarget || target));
     state.activeTargetRect = target;
     state.activeClickRect = clickTarget || target;
-    overlay.cardTitle.textContent = resolveStepText(step, "title");
-    overlay.cardBody.textContent = resolveStepText(step, "body");
-    overlay.cardHint.textContent = resolveStepText(step, "hint");
+    const title = resolveStepText(step, "title");
+    const body = resolveStepText(step, "body");
+    const hint = resolveStepText(step, "hint");
+    const rectKey = (rect) => rect
+      ? [rect.left, rect.top, rect.right, rect.bottom, rect.width, rect.height].map((value) => Math.round(value * 10)).join(",")
+      : "none";
+    const renderKey = [
+      window.innerWidth || 0,
+      window.innerHeight || 0,
+      rectKey(target),
+      rectKey(clickTarget || target),
+      title,
+      body,
+      hint
+    ].join("|");
+    if (renderKey === state.renderKey) {
+      state.layoutDirty = false;
+      return;
+    }
+    state.renderKey = renderKey;
+    state.layoutDirty = false;
+    overlay.cardTitle.textContent = title;
+    overlay.cardBody.textContent = body;
+    overlay.cardHint.textContent = hint;
     applyShadeRects(target);
     showOverlay();
     positionCardAndArrow(target);
@@ -905,6 +975,8 @@ function createTutorialController(options = {}){
     const stepId = state.activeStepId;
     if (!stepId) return;
     markCompleted(stepId);
+    const completed = listCompleted();
+    if (TUTORIAL_STEP_ORDER.every(id => completed.includes(id))) onComplete();
     state.suppressAdvanceUntil = performance.now() + 20;
     deactivateActiveStep();
     void reason;
@@ -952,6 +1024,10 @@ function createTutorialController(options = {}){
   }
 
   function frameLoop(){
+    if (!state.gameplayVisible) {
+      state.rafId = 0;
+      return;
+    }
     runScheduler();
     state.rafId = requestAnimationFrame(frameLoop);
   }
@@ -981,18 +1057,15 @@ function createTutorialController(options = {}){
       done = false;
     }
     if (done) completeActiveStep(`action:${actionId}`);
-    else renderActiveStep();
+    else {
+      markLayoutDirty();
+      renderActiveStep();
+    }
   }
 
   function onEvent(eventName, payload){
     if (eventName === GAME_EVENTS.RUN_STARTED) {
       state.runStartedAtMs = performance.now();
-    }
-    if (eventName === GAME_EVENTS.TOWER_SPECIAL_UPGRADE_OPENED) {
-      const forceFixed = shouldRunTutorial() && !isCompleted("special_upgrade_intro");
-      setTutorialSpecialChoiceMode(forceFixed);
-    } else if (eventName === GAME_EVENTS.TOWER_SPECIAL_UPGRADE_CHOSEN) {
-      setTutorialSpecialChoiceMode(false);
     }
     if (!shouldRunTutorial()) return;
     if (!state.activeStep) return;
@@ -1005,7 +1078,10 @@ function createTutorialController(options = {}){
       done = false;
     }
     if (done) completeActiveStep(`event:${eventName}`);
-    else renderActiveStep();
+    else {
+      markLayoutDirty();
+      renderActiveStep();
+    }
   }
 
   function onGlobalPointerDown(ev){
@@ -1031,11 +1107,16 @@ function createTutorialController(options = {}){
   function onEnterGameplay(){
     state.gameplayVisible = true;
     state.suppressAdvanceUntil = 0;
+    markLayoutDirty();
     runScheduler();
+    if (!state.rafId) frameLoop();
   }
 
   function onEnterMainMenu(){
     state.gameplayVisible = false;
+    if (state.rafId) cancelAnimationFrame(state.rafId);
+    state.rafId = 0;
+    markLayoutDirty();
     deactivateActiveStep();
   }
 
@@ -1045,12 +1126,14 @@ function createTutorialController(options = {}){
       settings.tutorial.completedStepIds = [];
     });
     state.suppressAdvanceUntil = 0;
+    markLayoutDirty();
     deactivateActiveStep();
     runScheduler();
   }
 
   function handleSettingsChanged(){
     state.suppressAdvanceUntil = 0;
+    markLayoutDirty();
     if (!isEnabled()) deactivateActiveStep();
     else runScheduler();
   }
@@ -1064,12 +1147,18 @@ function createTutorialController(options = {}){
     game.onEvent(GAME_EVENTS.WAVE_STARTED, (payload) => onEvent(GAME_EVENTS.WAVE_STARTED, payload))
   ];
 
+  const onResize = () => {
+    markLayoutDirty();
+    if (state.activeStep) renderActiveStep();
+  };
   window.addEventListener("pointerdown", onGlobalPointerDown, true);
+  window.addEventListener("resize", onResize);
   frameLoop();
 
   return Object.freeze({
     canAction,
     onAction,
+    shouldUseScriptedSpecialChoice,
     onEnterGameplay,
     onEnterMainMenu,
     resetProgress,
@@ -1077,6 +1166,7 @@ function createTutorialController(options = {}){
     destroy(){
       if (state.rafId) cancelAnimationFrame(state.rafId);
       window.removeEventListener("pointerdown", onGlobalPointerDown, true);
+      window.removeEventListener("resize", onResize);
       for (const off of unsubs) {
         try { off(); } catch (_) {}
       }
@@ -1086,4 +1176,4 @@ function createTutorialController(options = {}){
   });
 }
 
-export { createTutorialController, TUTORIAL_STEP_ORDER };
+export { createTutorialController, TUTORIAL_STEP_ORDER, isTutorialMapEligible, tutorialTowerPosition };

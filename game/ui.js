@@ -3,6 +3,8 @@ import { MILESTONES, setSpecialLegendaryMode } from "./towers.js";
 import { SFX } from "./audio.js";
 import { DEFAULT_KEYBINDS, TOWER_SHORTCUT_ACTIONS, isActionPressed } from "./preferences.js";
 import { CONTENT_REGISTRY } from "./content_registry.js";
+import { isDevToolsEnabled } from "./devtools.js";
+import { ARCHER_PATHS } from "./archer_specialization.js";
 
 let modalBack = null;
 let modalTitle = null;
@@ -91,6 +93,9 @@ export function closeModal(){
 
 export function initUI(game, options={}){
   initModal();
+  const devToolsEnabled = options.devToolsEnabled === undefined
+    ? isDevToolsEnabled()
+    : !!options.devToolsEnabled;
   const getKeybinds = () => (typeof options.getKeybinds === "function"
     ? options.getKeybinds()
     : DEFAULT_KEYBINDS);
@@ -171,6 +176,7 @@ export function initUI(game, options={}){
     }
   }
   renderShop();
+  if (cheatPanel) cheatPanel.classList.toggle("hidden", !devToolsEnabled);
 
   document.getElementById("startWaveBtn").onclick = () => {
     if (!canUiAction("start_wave_button", { source: "start_button" })) return;
@@ -197,10 +203,19 @@ export function initUI(game, options={}){
   }
   const nextMapBtn = document.getElementById("nextMapBtn");
   if (nextMapBtn) nextMapBtn.onclick = () => game.changeMap();
-  if (cheatGoldBtn) cheatGoldBtn.onclick = () => { game.gold += 1000000; game.refreshUI(true); };
-  if (cheatHpBtn) cheatHpBtn.onclick = () => { game.coreHP += 1000; game.refreshUI(true); };
+  if (cheatGoldBtn) cheatGoldBtn.onclick = () => {
+    if (!devToolsEnabled) return;
+    game.gold += 1000000;
+    game.refreshUI(true);
+  };
+  if (cheatHpBtn) cheatHpBtn.onclick = () => {
+    if (!devToolsEnabled) return;
+    game.coreHP += 1000;
+    game.refreshUI(true);
+  };
   if (cheatLegendaryBtn) {
     cheatLegendaryBtn.onclick = () => {
+      if (!devToolsEnabled) return;
       forceLegendary = !forceLegendary;
       setSpecialLegendaryMode(forceLegendary);
       cheatLegendaryBtn.classList.toggle("active", forceLegendary);
@@ -209,6 +224,7 @@ export function initUI(game, options={}){
   }
   if (cheatWaveGoBtn && cheatWaveInput) {
     cheatWaveGoBtn.onclick = () => {
+      if (!devToolsEnabled) return;
       const w = Math.max(1, parseInt(cheatWaveInput.value || "1", 10) || 1);
       game.jumpToWaveForTest(w);
       game.refreshUI(true);
@@ -216,6 +232,7 @@ export function initUI(game, options={}){
   }
   if (cheatSpeed10Btn) {
     cheatSpeed10Btn.onclick = () => {
+      if (!devToolsEnabled) return;
       setSpeed(10, { allowCheat: true });
       game.refreshUI(true);
     };
@@ -280,6 +297,29 @@ export function initUI(game, options={}){
   };
 
   document.getElementById("upgradeBtnHud").onclick = () => upgradeSelected();
+  const pathPicker = game.uiAdapter.refs.archerPathPicker;
+  if (pathPicker) {
+    pathPicker.addEventListener("keydown", (event) => {
+      if (event.code === "Space" || event.key === "Enter") event.stopPropagation();
+    });
+    for (const [id, path] of Object.entries(ARCHER_PATHS)) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = path.name;
+      const detail = document.createElement("small");
+      detail.textContent = path.description;
+      button.appendChild(detail);
+      button.onclick = () => {
+        const tower = game.selectedTowerInstance;
+        if (!tower || modalOpen || game.gameOver || game.winModalOpen || game.modifierIntroOpen) return;
+        if (!canUiAction("choose_archer_path", { towerId: tower.def.id })) return;
+        if (!tower.chooseArcherPath(id)) return;
+        game.logEvent(`Archer specialized in ${path.name}.`);
+        game.refreshUI(true);
+      };
+      pathPicker.appendChild(button);
+    }
+  }
   const fastUpgradeBtnHud = document.getElementById("fastUpgradeBtnHud");
   if (fastUpgradeBtnHud) fastUpgradeBtnHud.onclick = () => upgradeToNextMultipleOfFive();
   const upgradeBtnHud = document.getElementById("upgradeBtnHud");
@@ -324,8 +364,8 @@ export function initUI(game, options={}){
   function setSpeed(v, options = {}){
     if(modalOpen) return;
     const raw = Number(v) || 0;
-    const allowCheat = !!options.allowCheat
-      || ((raw > MAX_PUBLIC_GAME_SPEED) && (game.gameSpeed > MAX_PUBLIC_GAME_SPEED || lastNonZeroSpeed > MAX_PUBLIC_GAME_SPEED));
+    const allowCheat = devToolsEnabled && (!!options.allowCheat
+      || ((raw > MAX_PUBLIC_GAME_SPEED) && (game.gameSpeed > MAX_PUBLIC_GAME_SPEED || lastNonZeroSpeed > MAX_PUBLIC_GAME_SPEED)));
     const cap = allowCheat ? MAX_CHEAT_GAME_SPEED : MAX_PUBLIC_GAME_SPEED;
     const next = Math.min(cap, Math.max(0, raw));
     if (!canUiAction("set_game_speed", { value: next, raw })) return;

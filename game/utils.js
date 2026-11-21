@@ -1,6 +1,11 @@
 const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
   const dist2 = (ax,ay,bx,by) => { const dx=ax-bx, dy=ay-by; return dx*dx + dy*dy; };
-  const randInt = (a,b) => (a + Math.floor(Math.random()*(b-a+1)));
+  let randomState = 0x9e3779b9;
+  const setRandomSeed = (seed) => { const n = Number(seed) >>> 0; randomState = n || 0x9e3779b9; return randomState; };
+  const getRandomState = () => randomState >>> 0;
+  const setRandomState = setRandomSeed;
+  const random = () => { let x = randomState >>> 0; x ^= x << 13; x ^= x >>> 17; x ^= x << 5; randomState = x >>> 0; return randomState / 4294967296; };
+  const randInt = (a,b) => (a + Math.floor(random()*(b-a+1)));
   const now = () => performance.now() / 1000;
   const formatCompact = (value, fracDigits=1) => {
     const n = Number(value);
@@ -27,7 +32,7 @@ const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
   const pickN = (arr, n) => {
     const a=[...arr];
     for(let i=a.length-1;i>0;i--){
-      const j=Math.floor(Math.random()*(i+1));
+      const j=Math.floor(random()*(i+1));
       [a[i],a[j]]=[a[j],a[i]];
     }
     return a.slice(0,n);
@@ -37,4 +42,4 @@ const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
   // Damage model (armor negatif olabilir)
   // =========================================================
   
-export { clamp, dist2, randInt, now, formatCompact, pickN };
+export { clamp, dist2, randInt, random, setRandomSeed, getRandomState, setRandomState, now, formatCompact, pickN };

@@ -1,0 +1,5 @@
+@echo off
+setlocal
+title ARMTD - Yerel Oyun Sunucusu
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\start-game.ps1"
+if errorlevel 1 pause

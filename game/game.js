@@ -1,9 +1,10 @@
 ﻿import { CFG } from "./config.js";
-import { clamp, dist2, now, formatCompact, pickN } from "./utils.js";
+import { clamp, dist2, random, setRandomSeed, getRandomState, setRandomState, now, formatCompact, pickN } from "./utils.js";
 import { SFX } from "./audio.js";
 import { GameMap } from "./map.js";
-import { Enemy, computePrevWaveTotals, listEnemyModifiers } from "./enemies.js";
-import { scaleForWave, waveModifiers, WaveState, setEndlessScalingEnabled, getWaveEnemyCap } from "./waves.js";
+import { Enemy, FIRST_BOSS_WAVE, FIRST_BOSS_BRIEFING, computePrevWaveTotals, listEnemyModifiers } from "./enemies.js";
+import { applyMagicDamage } from "./damage.js";
+import { scaleForWave, waveModifiers, wavePlan, WaveState, setEndlessScalingEnabled } from "./waves.js";
 import {
   Tower,
   milestoneTier,
@@ -12,11 +13,11 @@ import {
   upgradeCostCurve,
   peelBuffPower,
   peelBounceCountFromAD,
-  poisonSkillMultiplier,
-  sniperOverlevelPct
+  magePrestigeAuraProfile
 } from "./towers.js";
 import { openModal, closeModal, isModalOpen } from "./ui.js";
 import { createGameUiAdapter } from "./ui_adapter.js";
+import { ARCHER_SPECIALIZATION_LEVEL, focusBonusPercent } from "./archer_specialization.js";
 import { SpatialIndex } from "./spatial_index.js";
 import { CONTENT_REGISTRY } from "./content_registry.js";
 import { GAME_EVENTS, createEventBus } from "./events.js";
@@ -26,6 +27,21 @@ import {
   releaseEffectRing,
   releaseFloatingText
 } from "./projectiles.js";
+
+// Render cadence must not change combat outcomes. The step budget deliberately
+// limits catch-up after a suspended tab, while preserving all time inside an
+// ordinary delayed frame.
+const SIMULATION_STEP_SEC = 1 / 60;
+const MAX_FRAME_DELTA_SEC = 0.25;
+const MAX_SIMULATION_STEPS_PER_FRAME = 30;
+const MAX_SPAWNS_PER_WAVE_STEP = 64;
+const VISUAL_BUDGETS = Object.freeze({
+  effects: 320,
+  floaters: 420,
+  centerQueue: 24,
+  rings: 180,
+  attackFlashes: 96
+});
 
 const BOSS_SKILL_INFO = {
   cleanse: { name: "Cleanse", color: "rgba(59,130,246,0.85)" },
@@ -41,6 +57,11 @@ const MAP_BG_BY_MAP = {
   },
   1: {
     src: "assets/ARTMTD_XENO.png",
+    crop: { x: 0.008, y: 0.02, w: 0.993, h: 0.973 },
+    scale: 1.05
+  },
+  2: {
+    src: "assets/ARMTD_ELIXIR.png",
     crop: { x: 0.0, y: 0.0, w: 1.0, h: 1.0 },
     scale: 1.0
   }
@@ -84,26 +105,21 @@ const PEEL_BUFF_INFO = {
 
 // Versioning: patch (right) for every update, minor (middle) for big updates.
 // Major (left) is increased manually.
-const GAME_VERSION = "0.4.13";
-const LOG_TIPS = [
-  "Tip: Discover each tower's unique skill and prestige skill.",
-  "Tip: Towers can reach level 20. Sometimes even higher.",
-  "Tip: Towers gain mana over time and also gain mana when they attack.",
-  "Tip: Mix different tower roles to keep your defense balanced.",
-  "Tip: Damage + Attack Speed is strong, but other combos can carry too.",
-  "Tip: Save gold before boss waves so you can react quickly.",
-  "Tip: Upgrade key towers first, then fill gaps with utility.",
-  "Tip: Mana-focused setups can keep skills active more often.",
-  "Tip: Don't overbuild early; reserve economy for key upgrades.",
-  "Tip: Try to activate prestige a bit before pressure spikes."
-];
+const GAME_VERSION = "0.6.33";
 const START_GOLD_BASE = 150;
 const START_GOLD_REWARD_KEY = "armtd_start_gold_reward_v1";
 const START_CORE_HP = 25;
 const RUN_SAVE_SCHEMA = 2;
 const RUN_SAVE_MIN_SUPPORTED_SCHEMA = 1;
+const MAX_SAVE_NUMBER = 1e12;
+const MAX_SAVE_WAVE = 10000;
+const MAX_SAVED_TOWERS = 256;
+const MAX_SPECIAL_UPGRADES = 4;
+const MAX_SAVE_TEXT = 96;
 const PERSISTENT_STATS_KEY = "armtd_stats_lifetime_v1";
 const TOWER_DEF_BY_ID = CONTENT_REGISTRY.towers.byId;
+const VALID_TARGET_MODES = new Set(["first", "last", "strongest", "pure", "random"]);
+const VALID_RARITY_IDS = new Set(["common", "uncommon", "rare", "epic", "legendary", "mythical"]);
 
 function getStartingGold(){
   try {
@@ -123,6 +139,44 @@ function clampNumber(v, min=0, fallback=0){
   const n = Number(v);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, n);
+}
+
+function boundedNumber(v, min, max, fallback=min){
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+function boundedText(v, fallback="", maxLength=MAX_SAVE_TEXT){
+  const text = String(v ?? fallback)
+    .replace(/[\u0000-\u001F\u007F]/g, " ")
+    .trim();
+  return (text || fallback).slice(0, maxLength);
+}
+
+function escapeHtmlText(value){
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function normalizeTargetMode(raw){
+  const mode = String(raw || "first");
+  return VALID_TARGET_MODES.has(mode) ? mode : "first";
+}
+
+function normalizeSpecialUpgrades(raw){
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, MAX_SPECIAL_UPGRADES).map(upg => ({
+    tier: Math.floor(boundedNumber(upg?.tier, 1, 4, 1)),
+    title: boundedText(upg?.title, "", MAX_SAVE_TEXT),
+    rarityId: VALID_RARITY_IDS.has(String(upg?.rarityId || ""))
+      ? String(upg.rarityId)
+      : "common"
+  }));
 }
 
 function normalizeGridCell(v){
@@ -154,25 +208,20 @@ function addRoundRectPath(ctx, x, y, w, h, r){
   ctx.rect(x, y, w, h);
 }
 
-function magePrestigeAuraMulFromMagic(magic){
-  void magic;
-  return 8.8;
-}
-
-function magePrestigeAuraRangeBonusFromMagic(magic){
-  void magic;
-  return 1.20;
-}
-
 function createEmptyRunStats(){
   return {
     totalKills: 0,
     totalDamage: 0,
+    totalOverkill: 0,
     maxSingleHit: 0,
     maxWaveSeen: 0,
     towerBuildCounts: buildTowerCounter(0),
     towerKillCounts: buildTowerCounter(0),
-    towerDamage: buildTowerCounter(0)
+    towerDamage: buildTowerCounter(0),
+    towerOverkill: buildTowerCounter(0),
+    supportBuffEvents: 0,
+    supportBuffSeconds: 0,
+    supportGold: 0
   };
 }
 
@@ -197,6 +246,7 @@ function createEmptyRunQuestState(){
     coreDamaged: false,
     sniperPurchased: false,
     uniqueTowerTypesOnly: true,
+    noPrestigeUnlocked: true,
     campaignCleared: false,
     clearedAtWave: 0
   };
@@ -206,7 +256,7 @@ function normalizeTowerCounter(raw){
   const out = buildTowerCounter(0);
   if (!raw || typeof raw !== "object") return out;
   for (const def of CONTENT_REGISTRY.towers.list) {
-    out[def.id] = Math.floor(clampNumber(raw[def.id], 0, 0));
+    out[def.id] = Math.floor(boundedNumber(raw[def.id], 0, MAX_SAVE_NUMBER, 0));
   }
   return out;
 }
@@ -214,13 +264,18 @@ function normalizeTowerCounter(raw){
 function normalizeRunStats(raw){
   const base = createEmptyRunStats();
   if (!raw || typeof raw !== "object") return base;
-  base.totalKills = Math.floor(clampNumber(raw.totalKills, 0, 0));
-  base.totalDamage = clampNumber(raw.totalDamage, 0, 0);
-  base.maxSingleHit = clampNumber(raw.maxSingleHit, 0, 0);
-  base.maxWaveSeen = Math.floor(clampNumber(raw.maxWaveSeen, 0, 0));
+  base.totalKills = Math.floor(boundedNumber(raw.totalKills, 0, MAX_SAVE_NUMBER, 0));
+  base.totalDamage = boundedNumber(raw.totalDamage, 0, MAX_SAVE_NUMBER, 0);
+  base.totalOverkill = boundedNumber(raw.totalOverkill, 0, MAX_SAVE_NUMBER, 0);
+  base.maxSingleHit = boundedNumber(raw.maxSingleHit, 0, MAX_SAVE_NUMBER, 0);
+  base.maxWaveSeen = Math.floor(boundedNumber(raw.maxWaveSeen, 0, MAX_SAVE_WAVE, 0));
   base.towerBuildCounts = normalizeTowerCounter(raw.towerBuildCounts);
   base.towerKillCounts = normalizeTowerCounter(raw.towerKillCounts);
   base.towerDamage = normalizeTowerCounter(raw.towerDamage);
+  base.towerOverkill = normalizeTowerCounter(raw.towerOverkill);
+  base.supportBuffEvents = Math.floor(boundedNumber(raw.supportBuffEvents, 0, MAX_SAVE_NUMBER, 0));
+  base.supportBuffSeconds = boundedNumber(raw.supportBuffSeconds, 0, MAX_SAVE_NUMBER, 0);
+  base.supportGold = boundedNumber(raw.supportGold, 0, MAX_SAVE_NUMBER, 0);
   return base;
 }
 
@@ -230,8 +285,9 @@ function normalizeRunQuestState(raw){
   base.coreDamaged = !!raw.coreDamaged;
   base.sniperPurchased = !!raw.sniperPurchased;
   base.uniqueTowerTypesOnly = raw.uniqueTowerTypesOnly !== false;
+  base.noPrestigeUnlocked = raw.noPrestigeUnlocked !== false;
   base.campaignCleared = !!raw.campaignCleared;
-  base.clearedAtWave = Math.floor(clampNumber(raw.clearedAtWave, 0, 0));
+  base.clearedAtWave = Math.floor(boundedNumber(raw.clearedAtWave, 0, MAX_SAVE_WAVE, 0));
   return base;
 }
 
@@ -255,7 +311,7 @@ function normalizeMapDef(raw){
   grid[entrance.y][entrance.x] = 1;
   grid[exit.y][exit.x] = 1;
   return {
-    name: String(raw.name || "Custom Map"),
+    name: boundedText(raw.name, "Custom Map", 48),
     gridW,
     gridH,
     entrance,
@@ -274,6 +330,15 @@ function clampCampaignMapIndex(raw){
   return Math.min(max, Math.max(0, Math.floor(clampNumber(raw, 0, 0))));
 }
 
+function getCampaignTargetWaveByMapIndex(mapIndex){
+  const fromRegistry = (typeof CONTENT_REGISTRY?.maps?.getTargetWaveByMapIndex === "function")
+    ? CONTENT_REGISTRY.maps.getTargetWaveByMapIndex(mapIndex)
+    : null;
+  if (Number.isFinite(fromRegistry)) return Math.max(1, Math.floor(fromRegistry));
+  const idx = clampCampaignMapIndex(mapIndex);
+  return Math.max(100, 100 + idx * 5);
+}
+
 function getCampaignMapDef(rawIndex){
   const safe = clampCampaignMapIndex(rawIndex);
   return CONTENT_REGISTRY.maps.get(safe) || CONTENT_REGISTRY.maps.get(0);
@@ -288,9 +353,13 @@ function createRunSaveMeta(raw){
     ? Math.floor(Number(src.migratedAt))
     : null;
   return {
-    source: String(src.source || "runtime"),
-    migratedFromSchema,
-    migratedAt
+    source: boundedText(src.source, "runtime", 32),
+    migratedFromSchema: Number.isFinite(migratedFromSchema)
+      ? Math.max(0, Math.min(RUN_SAVE_SCHEMA, migratedFromSchema))
+      : null,
+    migratedAt: Number.isFinite(migratedAt)
+      ? Math.max(0, Math.min(Date.now(), migratedAt))
+      : null
   };
 }
 
@@ -332,22 +401,24 @@ function normalizeRunSaveData(raw){
   const customMapDef = normalizeMapDef(migrated.customMapDef);
   const isCustomMapRun = !!migrated.isCustomMapRun && !!customMapDef;
   const stats = normalizeRunStats(migrated.stats);
-  const totalKills = Math.floor(clampNumber(migrated.totalKills, 0, 0));
+  const totalKills = Math.floor(boundedNumber(migrated.totalKills, 0, MAX_SAVE_NUMBER, 0));
   stats.totalKills = Math.max(stats.totalKills, totalKills);
   return {
     schema: RUN_SAVE_SCHEMA,
-    gameVersion: String(migrated.gameVersion || "unknown"),
-    savedAt: Math.floor(clampNumber(migrated.savedAt, 0, Date.now())),
+    gameVersion: boundedText(migrated.gameVersion, "unknown", 32),
+    savedAt: Math.floor(boundedNumber(migrated.savedAt, 0, Date.now(), 0)),
     mapIndex: clampCampaignMapIndex(migrated.mapIndex),
     gold: Math.floor(clampNumber(migrated.gold, 0, getStartingGold())),
     coreHP: clampNumber(migrated.coreHP, 0, START_CORE_HP),
-    totalKills,
-    resumeWave: Math.floor(clampNumber(migrated.resumeWave, 0, 0)),
+    totalKills: Math.min(MAX_SAVE_NUMBER, totalKills),
+    resumeWave: Math.floor(boundedNumber(migrated.resumeWave, 0, MAX_SAVE_WAVE, 0)),
     started: !!migrated.started,
     endlessMode: !!migrated.endlessMode,
+    simTime: boundedNumber(migrated.simTime, 0, MAX_SAVE_NUMBER, 0),
+    rngState: Number(migrated.rngState) >>> 0,
     isCustomMapRun,
     customMapDef: isCustomMapRun ? customMapDef : null,
-    towers: Array.isArray(migrated.towers) ? migrated.towers : [],
+    towers: Array.isArray(migrated.towers) ? migrated.towers.slice(0, MAX_SAVED_TOWERS) : [],
     stats,
     questState: normalizeRunQuestState(migrated.questState),
     meta: createRunSaveMeta(migrated.meta)
@@ -356,6 +427,8 @@ function normalizeRunSaveData(raw){
 
 class Game {
     constructor(canvas){
+      this.rngSeed = (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
+      setRandomSeed(this.rngSeed);
       this.cv=canvas;
       this.ctx=canvas.getContext("2d");
 
@@ -381,8 +454,11 @@ class Game {
       this.projectiles=[];
       this.effects=[];
       this.rings=[];
+      this.attackFlashes=[];
+      this._attackFlashCursor=0;
       this.enemySpatial = new SpatialIndex(1.5);
       this.towerSpatial = new SpatialIndex(1.5);
+      this._towerSpatialDirty = true;
       this._enemyRangeScratch = [];
       this._towerRangeScratch = [];
 
@@ -396,6 +472,10 @@ class Game {
       this.hoverGrid=null;
 
       this.gameSpeed=1.0;
+      this.simTime = 0;
+      this._simulationAccumulator = 0;
+      this._resizeDirty = true;
+      this._resizeMapKey = "";
       this.prevSpeedBeforeModal=1.0;
       this.screenShakeTime = 0;
       this.screenShakeMaxTime = 0;
@@ -426,8 +506,8 @@ class Game {
       this._campaignClearNotified = false;
       this.onCampaignClear = null;
       this.events = createEventBus();
-      this.tutorialHooks = { canAction: null, onAction: null };
-      this.tutorialForceFixedSpecialChoices = false;
+      this.tutorialHooks = { canAction: null, onAction: null, shouldUseScriptedSpecialChoice: null };
+      this.tutorialSpecialChoicePending = true;
       setEndlessScalingEnabled(false);
 
       this.uiAdapter = createGameUiAdapter(document);
@@ -442,11 +522,25 @@ class Game {
       this._uiDirty = true;
       this._uiRefreshTimer = 0;
       this._uiRefreshInterval = 1 / 12;
+      this._selectedPanelSignature = null;
+      this._selectedPanelObjectIds = new WeakMap();
+      this._selectedPanelObjectNextId = 1;
       // Lifetime stats persistence throttling: avoid localStorage writes on every hit/kill.
       this._statsDirty = false;
       this._statsFlushTimer = 0;
       this._statsFlushInterval = 1.0;
-      this._perfAcc = { sec: 0, frames: 0, frameMs: 0, updateMs: 0, drawMs: 0, uiMs: 0 };
+      this._perfAcc = {
+        sec: 0,
+        frames: 0,
+        framePacingMs: 0,
+        framePacingSamples: [],
+        jsFrameMs: 0,
+        updateMs: 0,
+        drawMs: 0,
+        uiMs: 0
+      };
+      this._fpsAcc = { sec: 0, frames: 0, label: "--" };
+      this.menuVisibility = null;
       this.seenModifierIds = new Set();
       this.modifierIntroOpen = false;
       this.modifierIntroPrevSpeed = 1.0;
@@ -476,13 +570,13 @@ class Game {
       this.hudWaveEl = ui.hudWave;
       this.hudMobsEl = ui.hudMobs;
       this.mapNameEl = ui.mapName;
+      this.mapWipBannerEl = ui.mapWipBanner;
       this.startWaveBtnEl = ui.startWaveBtn;
       this.nextWaveNowBtnEl = ui.nextWaveNowBtn;
       this.selectedInfoHudEl = ui.selectedInfoHud;
       this.upgradeBtnHudEl = ui.upgradeBtnHud;
       this.fastUpgradeBtnHudEl = ui.fastUpgradeBtnHud;
       this.sellBtnHudEl = ui.sellBtnHud;
-      this.cheatFormulaDebugEl = ui.cheatFormulaDebug;
       this.onGameOverMainMenu = null;
       if (this.gameOverRestartBtn) this.gameOverRestartBtn.onclick = () => this.restart();
       if (this.gameOverInspectBtn) this.gameOverInspectBtn.onclick = () => this.enterGameOverInspectMode();
@@ -499,7 +593,16 @@ class Game {
 
       this.mapBg = new Image();
       this.mapBgReady = false;
-      this.mapBg.onload = () => { this.mapBgReady = true; };
+      this.mapBg.onload = () => {
+        this.mapBgReady = true;
+        this.invalidateStaticMapCache();
+      };
+      this.staticMapCanvas = (typeof document !== "undefined" && typeof document.createElement === "function")
+        ? document.createElement("canvas")
+        : null;
+      this.staticMapCtx = this.staticMapCanvas?.getContext?.("2d") || null;
+      this._staticMapCacheKey = "";
+      this._staticMapRenderCount = 0;
       this.refreshMapBackground();
 
       this.archerSprite = new Image();
@@ -537,8 +640,11 @@ class Game {
       this.peelSprite.onload = () => { this.peelSpriteReady = true; };
       this.peelSprite.src = PEEL_SPRITE.src;
 
-      this.resizeCanvasToDisplaySize();
-      window.addEventListener("resize", ()=>this.resizeCanvasToDisplaySize());
+      this.resizeCanvasToDisplaySize(true);
+      window.addEventListener("resize", ()=>{
+        this._resizeDirty = true;
+        this.resizeCanvasToDisplaySize(true);
+      });
       window.addEventListener("beforeunload", () => this.persistLifetimeStats(true));
 
       this.lastT=now();
@@ -552,14 +658,47 @@ class Game {
     }
 
     getMapBackgroundDef(){
-      return MAP_BG_BY_MAP[this.mapIndex] || MAP_BG_BY_MAP[0];
+      return MAP_BG_BY_MAP[this.mapIndex] || null;
+    }
+
+    getCurrentCampaignCardMeta(){
+      if (this.isCustomMapRun) return null;
+      const catalog = (typeof CONTENT_REGISTRY?.maps?.getCampaignCatalog === "function")
+        ? CONTENT_REGISTRY.maps.getCampaignCatalog()
+        : [];
+      if (!Array.isArray(catalog)) return null;
+      return catalog.find((row) => Number(row?.mapIndex) === this.mapIndex) || null;
+    }
+
+    refreshMapWipBanner(){
+      const bannerEl = this.mapWipBannerEl;
+      if (!bannerEl) return;
+      const mapMeta = this.getCurrentCampaignCardMeta();
+      const visible = !!mapMeta?.wip;
+      bannerEl.classList.toggle("hidden", !visible);
+      if (!visible) return;
+      const dpr = window.devicePixelRatio || 1;
+      const tileCss = Math.max(28, Math.round((this.tileSize || 0) / dpr));
+      bannerEl.style.height = `${tileCss}px`;
+      bannerEl.style.lineHeight = `${tileCss}px`;
+      bannerEl.style.fontSize = `${Math.max(12, Math.round(tileCss * 0.42))}px`;
     }
 
     refreshMapBackground(){
       const bgDef = this.getMapBackgroundDef();
-      if (!bgDef?.src) return;
+      this.refreshMapWipBanner();
+      this.invalidateStaticMapCache();
+      this.mapBgReady = false;
+      if (!bgDef?.src) {
+        this.mapBg.removeAttribute("src");
+        return;
+      }
       this.mapBgReady = false;
       this.mapBg.src = bgDef.src;
+    }
+
+    invalidateStaticMapCache(){
+      this._staticMapCacheKey = "";
     }
 
     canPrestigeUpgrade(tower){
@@ -598,8 +737,21 @@ class Game {
     setTutorialHooks(hooks = {}){
       this.tutorialHooks = {
         canAction: (typeof hooks?.canAction === "function") ? hooks.canAction : null,
-        onAction: (typeof hooks?.onAction === "function") ? hooks.onAction : null
+        onAction: (typeof hooks?.onAction === "function") ? hooks.onAction : null,
+        shouldUseScriptedSpecialChoice: (typeof hooks?.shouldUseScriptedSpecialChoice === "function")
+          ? hooks.shouldUseScriptedSpecialChoice
+          : null
       };
+    }
+
+    shouldUseTutorialScriptedSpecialChoice(){
+      const fn = this.tutorialHooks?.shouldUseScriptedSpecialChoice;
+      if (typeof fn !== "function") return false;
+      try {
+        return fn(this) === true;
+      } catch (_) {
+        return false;
+      }
     }
 
     canRunTutorialAction(actionId, payload = {}){
@@ -629,12 +781,64 @@ class Game {
       this.screenShakeMaxTime = Math.max(this.screenShakeMaxTime, this.screenShakeTime);
     }
 
+    // A short-lived, render-only record made when a tower fires. It is kept in
+    // a fixed-size buffer so high attack speed cannot grow transient memory.
+    spawnAttackFlash(tower, target, visual = {}, isCritical = false){
+      if (!tower || !target) return;
+      const limit = this.getVisualBudget("attackFlashes");
+      if (limit <= 0) return;
+
+      if (this.attackFlashes.length > limit) {
+        this.attackFlashes.length = limit;
+        this._attackFlashCursor %= Math.max(1, limit);
+      }
+
+      let flash = this.attackFlashes.find(item => !item || item.life <= 0);
+      if (!flash && this.attackFlashes.length < limit) {
+        flash = {};
+        this.attackFlashes.push(flash);
+      }
+      if (!flash) {
+        const index = this._attackFlashCursor % Math.max(1, this.attackFlashes.length);
+        flash = this.attackFlashes[index];
+        this._attackFlashCursor = (index + 1) % Math.max(1, this.attackFlashes.length);
+      }
+
+      const dx = (Number(target.x) || 0) - (Number(tower.x) || 0);
+      const dy = (Number(target.y) || 0) - (Number(tower.y) || 0);
+      const length = Math.hypot(dx, dy) || 1;
+      const life = isCritical ? 0.14 : 0.105;
+      flash.x = Number(tower.x) || 0;
+      flash.y = Number(tower.y) || 0;
+      flash.dx = dx / length;
+      flash.dy = dy / length;
+      flash.color = (typeof visual?.color === "string" && visual.color) || "rgba(255,255,255,0.92)";
+      flash.kind = tower.def?.id || "generic";
+      flash.isCritical = !!isCritical;
+      flash.life = life;
+      flash.maxLife = life;
+    }
+
+    updateAttackFlashes(dt){
+      const safeDt = Math.max(0, Number(dt) || 0);
+      const limit = this.getVisualBudget("attackFlashes");
+      if (this.attackFlashes.length > limit) {
+        this.attackFlashes.length = limit;
+        this._attackFlashCursor %= Math.max(1, limit);
+      }
+      for (const flash of this.attackFlashes) {
+        if (flash?.life > 0) flash.life = Math.max(0, flash.life - safeDt);
+      }
+    }
+
     getScreenShakeOffset(){
       if (this.screenShakeTime <= 0 || this.screenShakePower <= 0) return { x: 0, y: 0 };
       const fade = (this.screenShakeMaxTime > 0)
         ? clamp(this.screenShakeTime / this.screenShakeMaxTime, 0, 1)
         : 0;
       const amp = this.tileSize * this.screenShakePower * fade;
+      // Screen shake is visual-only. It must not advance the seeded combat RNG,
+      // otherwise the same run diverges with a different render cadence.
       const a = Math.random() * Math.PI * 2;
       return { x: Math.cos(a) * amp, y: Math.sin(a) * amp };
     }
@@ -713,6 +917,11 @@ class Game {
       this._campaignClearNotified = false;
     }
 
+    getCampaignTargetWave(){
+      if (this.isCustomMapRun) return 100;
+      return getCampaignTargetWaveByMapIndex(this.mapIndex);
+    }
+
     evaluateUniqueTowerTypeChallenge(){
       if (!this.runQuestState?.uniqueTowerTypesOnly) return;
       const counts = Object.create(null);
@@ -725,6 +934,17 @@ class Game {
           this.logEvent("Challenge failed: duplicate tower type built.");
           return;
         }
+      }
+    }
+
+    evaluateNoPrestigeChallenge(){
+      if (!this.runQuestState?.noPrestigeUnlocked) return;
+      for (const tower of this.towers) {
+        if (!tower) continue;
+        if (Math.max(0, Math.floor(Number(tower.level) || 0)) < CFG.PRESTIGE_LEVEL) continue;
+        this.runQuestState.noPrestigeUnlocked = false;
+        this.logEvent("Challenge failed: No Prestige (a tower reached Prestige level).");
+        return;
       }
     }
 
@@ -753,19 +973,24 @@ class Game {
       });
     }
 
-    recordDamage(amount, sourceTower=null){
+    recordDamage(amount, sourceTower=null, overkill=0){
       const dealt = clampNumber(amount, 0, 0);
-      if (dealt <= 0) return;
+      const excess = clampNumber(overkill, 0, 0);
+      if (dealt <= 0 && excess <= 0) return;
       this.runStats.totalDamage += dealt;
+      this.runStats.totalOverkill += excess;
       this.runStats.maxSingleHit = Math.max(this.runStats.maxSingleHit, dealt);
       this.lifetimeStats.totalDamage += dealt;
+      this.lifetimeStats.totalOverkill += excess;
       this.lifetimeStats.maxSingleHit = Math.max(this.lifetimeStats.maxSingleHit, dealt);
       const towerId = sourceTower?.def?.id;
       if (towerId && towerId in this.runStats.towerDamage) {
         this.runStats.towerDamage[towerId] += dealt;
+        this.runStats.towerOverkill[towerId] += excess;
       }
       if (towerId && towerId in this.lifetimeStats.towerDamage) {
         this.lifetimeStats.towerDamage[towerId] += dealt;
+        this.lifetimeStats.towerOverkill[towerId] += excess;
       }
       this.persistLifetimeStats();
     }
@@ -828,6 +1053,12 @@ class Game {
       const prevLevel = Math.max(0, Math.floor(Number(fromLevel) || 0));
       const nextLevel = Math.max(0, Math.floor(Number(tower.level) || 0));
       if (nextLevel <= prevLevel) return;
+      if (prevLevel < CFG.PRESTIGE_LEVEL && nextLevel >= CFG.PRESTIGE_LEVEL) {
+        if (this.runQuestState?.noPrestigeUnlocked) {
+          this.runQuestState.noPrestigeUnlocked = false;
+          this.logEvent("Challenge failed: No Prestige (a tower reached Prestige level).");
+        }
+      }
       this.emitGameEvent(GAME_EVENTS.TOWER_LEVEL_UP, {
         towerId: tower.def.id,
         fromLevel: prevLevel,
@@ -850,12 +1081,14 @@ class Game {
 
     evaluateCampaignStars(){
       const quest = this.getRunQuestSnapshot();
-      const cleared = quest.campaignCleared || this.currentWave >= 100;
+      const targetWave = this.getCampaignTargetWave();
+      const cleared = quest.campaignCleared || this.currentWave >= targetWave;
       return {
         star1: !!cleared,
         star2: !!cleared && !quest.coreDamaged,
         star3: !!cleared && !quest.sniperPurchased,
-        star4: !!cleared && !!quest.uniqueTowerTypesOnly
+        star4: !!cleared && !!quest.uniqueTowerTypesOnly,
+        star5: !!cleared && !!quest.noPrestigeUnlocked
       };
     }
 
@@ -866,6 +1099,7 @@ class Game {
         mapIndex: this.mapIndex,
         isCustomMapRun: !!this.isCustomMapRun,
         stars: this.evaluateCampaignStars(),
+        targetWave: this.getCampaignTargetWave(),
         maxWave: Math.max(0, Math.floor(this.currentWave || 0)),
         questState: this.getRunQuestSnapshot()
       };
@@ -900,39 +1134,40 @@ class Game {
         id: tower.def.id,
         gx: Math.floor(clampNumber(tower.gx, 0, 0)),
         gy: Math.floor(clampNumber(tower.gy, 0, 0)),
-        level: Math.floor(clampNumber(tower.level, 1, 1)),
-        spentGold: Math.floor(clampNumber(tower.spentGold, 0, tower.def.cost || 0)),
-        cooldown: clampNumber(tower.cooldown, 0, 0),
-        damageDealt: clampNumber(tower.damageDealt, 0, 0),
-        kills: Math.floor(clampNumber(tower.kills, 0, 0)),
+        level: Math.floor(boundedNumber(tower.level, 1, CFG.PRESTIGE_LEVEL, 1)),
+        spentGold: Math.floor(boundedNumber(tower.spentGold, 0, MAX_SAVE_NUMBER, tower.def.cost || 0)),
+        cooldown: boundedNumber(tower.cooldown, 0, 60, 0),
+        damageDealt: boundedNumber(tower.damageDealt, 0, MAX_SAVE_NUMBER, 0),
+        kills: Math.floor(boundedNumber(tower.kills, 0, MAX_SAVE_NUMBER, 0)),
         AD: [
           Math.floor(clampNumber(tower.AD?.[0], 1, tower.def.base?.AD?.[0] ?? 1)),
           Math.floor(clampNumber(tower.AD?.[1], 1, tower.def.base?.AD?.[1] ?? 1))
         ],
-        baseAS: clampNumber(tower.baseAS, 0.05, tower.def.base?.AS ?? 1),
-        baseRange: clampNumber(tower.baseRange, 1, tower.def.base?.Range ?? 1),
-        critChance: clamp(clampNumber(tower.critChance, 0, tower.def.base?.CrC ?? 0), 0, 1),
-        critDmg: clampNumber(tower.critDmg, 1, tower.def.base?.CrD ?? 1.5),
+        baseAS: boundedNumber(tower.baseAS, 0.05, 1000, tower.def.base?.AS ?? 1),
+        baseRange: boundedNumber(tower.baseRange, 1, 1000, tower.def.base?.Range ?? 1),
+        critChance: clamp(boundedNumber(tower.critChance, 0, 1, tower.def.base?.CrC ?? 0), 0, 1),
+        critDmg: boundedNumber(tower.critDmg, 1, 10, tower.def.base?.CrD ?? 1.5),
         magicBonus: clampNumber(tower.magicBonus, 0, tower.def.base?.MD ?? 0),
         magicBonusExact: clampNumber(tower.magicBonusExact, 0, tower.def.base?.MD ?? 0),
-        manaRegen: clampNumber(tower.manaRegen, 0, tower.def.base?.MaR ?? 0),
-        manaOnHit: clampNumber(tower.manaOnHit, 0, tower.def.base?.manaOnHit ?? 0),
+        manaRegen: boundedNumber(tower.manaRegen, 0, MAX_SAVE_NUMBER, tower.def.base?.MaR ?? 0),
+        manaOnHit: boundedNumber(tower.manaOnHit, 0, MAX_SAVE_NUMBER, tower.def.base?.manaOnHit ?? 0),
         armorPenPct: clamp(clampNumber(tower.armorPenPct, 0, tower.def.base?.ArP ?? 0), 0, 2),
         magicPenFlat: clampNumber(tower.magicPenFlat, 0, tower.def.base?.MaP ?? 0),
-        maxMana: clampNumber(tower.maxMana, 0, tower.def.skillManaCost ?? 0),
+        maxMana: boundedNumber(tower.maxMana, 0, MAX_SAVE_NUMBER, tower.def.skillManaCost ?? 0),
         mana: clampNumber(tower.mana, 0, 0),
-        prestigeMaxMana: clampNumber(tower.prestigeMaxMana, 0, tower.def.prestige?.mana ?? 0),
+        prestigeMaxMana: boundedNumber(tower.prestigeMaxMana, 0, MAX_SAVE_NUMBER, tower.def.prestige?.mana ?? 0),
         prestigeMana: clampNumber(tower.prestigeMana, 0, 0),
-        prestigeActive: clampNumber(tower.prestigeActive, 0, 0),
-        prestigeDamageMul: clampNumber(tower.prestigeDamageMul, 1, 1),
-        prestigeGoldTotal: clampNumber(tower.prestigeGoldTotal, 0, 0),
-        uplinkTotalCore: clampNumber(tower.uplinkTotalCore, 0, 0),
-        uplinkTotalGold: clampNumber(tower.uplinkTotalGold, 0, 0),
-        tempASMul: clampNumber(tower.tempASMul, 0.05, 1),
+        prestigeActive: boundedNumber(tower.prestigeActive, 0, 60, 0),
+        prestigeDamageMul: boundedNumber(tower.prestigeDamageMul, 1, 10, 1),
+        prestigeGoldTotal: boundedNumber(tower.prestigeGoldTotal, 0, MAX_SAVE_NUMBER, 0),
+        uplinkTotalCore: boundedNumber(tower.uplinkTotalCore, 0, MAX_SAVE_NUMBER, 0),
+        uplinkTotalGold: boundedNumber(tower.uplinkTotalGold, 0, MAX_SAVE_NUMBER, 0),
+        tempASMul: boundedNumber(tower.tempASMul, 0.05, 10, 1),
         forceChainAll: !!tower.forceChainAll,
         cleaveAll: !!tower.cleaveAll,
-        targetMode: String(tower.targetMode || "first"),
-        secondaryLevel: Math.floor(clampNumber(tower.secondaryLevel, 0, 0)),
+        targetMode: normalizeTargetMode(tower.targetMode),
+        ...(tower.archerSpecialization ? { archerSpecialization: tower.archerSpecialization } : {}),
+        secondaryLevel: Math.floor(boundedNumber(tower.secondaryLevel, 0, MAX_SAVE_WAVE, 0)),
         perks: {
           asMul: clampNumber(tower.perks?.asMul, 0.05, 1),
           adMul: clampNumber(tower.perks?.adMul, 0.05, 1),
@@ -940,15 +1175,9 @@ class Game {
           dmgMul: clampNumber(tower.perks?.dmgMul, 0.05, 1)
         },
         facing: tower.facing === -1 ? -1 : 1,
-        specialUpgrades: Array.isArray(tower.specialUpgrades)
-          ? tower.specialUpgrades.map(upg => ({
-              tier: Math.floor(clampNumber(upg?.tier, 1, 1)),
-              title: String(upg?.title || ""),
-              rarityId: String(upg?.rarityId || "common")
-            }))
-          : [],
-        specialMagicActualMul: clampNumber(tower.specialMagicActualMul, 0.05, 1),
-        specialMagicExpectedMul: clampNumber(tower.specialMagicExpectedMul, 0.05, 1)
+        specialUpgrades: normalizeSpecialUpgrades(tower.specialUpgrades),
+        specialMagicActualMul: boundedNumber(tower.specialMagicActualMul, 0.05, 10, 1),
+        specialMagicExpectedMul: boundedNumber(tower.specialMagicExpectedMul, 0.05, 10, 1)
       };
     }
 
@@ -961,69 +1190,67 @@ class Game {
       if (!this.canPlaceTowerAt(gx, gy, def)) return null;
 
       const tower = new Tower(def, gx, gy, this);
-      tower.level = Math.floor(clampNumber(raw.level, 1, 1));
-      tower.spentGold = Math.floor(clampNumber(raw.spentGold, 0, def.cost || 0));
-      tower.cooldown = clampNumber(raw.cooldown, 0, 0);
-      tower.damageDealt = clampNumber(raw.damageDealt, 0, 0);
-      tower.kills = Math.floor(clampNumber(raw.kills, 0, 0));
-      const adLow = Math.floor(clampNumber(raw.AD?.[0], 1, def.base.AD[0]));
-      const adHigh = Math.floor(clampNumber(raw.AD?.[1], adLow, def.base.AD[1]));
+      tower.level = Math.floor(boundedNumber(raw.level, 1, CFG.PRESTIGE_LEVEL, 1));
+      tower.chooseArcherPath(raw.archerSpecialization);
+      tower.spentGold = Math.floor(boundedNumber(raw.spentGold, 0, MAX_SAVE_NUMBER, def.cost || 0));
+      tower.cooldown = boundedNumber(raw.cooldown, 0, 60, 0);
+      tower.damageDealt = boundedNumber(raw.damageDealt, 0, MAX_SAVE_NUMBER, 0);
+      tower.kills = Math.floor(boundedNumber(raw.kills, 0, MAX_SAVE_NUMBER, 0));
+      const adLow = Math.floor(boundedNumber(raw.AD?.[0], 1, MAX_SAVE_NUMBER, def.base.AD[0]));
+      const adHigh = Math.floor(boundedNumber(raw.AD?.[1], adLow, MAX_SAVE_NUMBER, def.base.AD[1]));
       tower.AD = [adLow, Math.max(adLow, adHigh)];
-      tower.baseAS = clampNumber(raw.baseAS, 0.05, def.base.AS);
-      tower.baseRange = clampNumber(raw.baseRange, 1, def.base.Range);
-      tower.critChance = clamp(clampNumber(raw.critChance, 0, def.base.CrC), 0, 1);
-      tower.critDmg = clampNumber(raw.critDmg, 1, def.base.CrD);
-      tower.magicBonus = clampNumber(raw.magicBonus, 0, def.base.MD);
-      tower.magicBonusExact = clampNumber(raw.magicBonusExact, 0, tower.magicBonus);
+      tower.baseAS = boundedNumber(raw.baseAS, 0.05, 1000, def.base.AS);
+      tower.baseRange = boundedNumber(raw.baseRange, 1, 1000, def.base.Range);
+      tower.critChance = clamp(boundedNumber(raw.critChance, 0, 1, def.base.CrC), 0, 1);
+      tower.critDmg = boundedNumber(raw.critDmg, 1, 10, def.base.CrD);
+      tower.magicBonus = boundedNumber(raw.magicBonus, 0, MAX_SAVE_NUMBER, def.base.MD);
+      tower.magicBonusExact = boundedNumber(raw.magicBonusExact, 0, tower.magicBonus, tower.magicBonus);
       if (tower.magicBonusExact <= 0) tower.magicBonusExact = tower.magicBonus;
-      tower.manaRegen = clampNumber(raw.manaRegen, 0, def.base.MaR);
-      tower.manaOnHit = clampNumber(raw.manaOnHit, 0, def.base.manaOnHit);
+      tower.manaRegen = boundedNumber(raw.manaRegen, 0, MAX_SAVE_NUMBER, def.base.MaR);
+      tower.manaOnHit = boundedNumber(raw.manaOnHit, 0, MAX_SAVE_NUMBER, def.base.manaOnHit);
       tower.armorPenPct = clamp(clampNumber(raw.armorPenPct, 0, def.base.ArP), 0, 2);
-      tower.magicPenFlat = clampNumber(raw.magicPenFlat, 0, def.base.MaP);
-      tower.maxMana = clampNumber(raw.maxMana, 0, def.skillManaCost ?? 0);
+      tower.magicPenFlat = boundedNumber(raw.magicPenFlat, 0, MAX_SAVE_NUMBER, def.base.MaP);
+      tower.maxMana = boundedNumber(raw.maxMana, 0, MAX_SAVE_NUMBER, def.skillManaCost ?? 0);
       tower.mana = clamp(clampNumber(raw.mana, 0, 0), 0, tower.maxMana || 0);
-      tower.prestigeMaxMana = clampNumber(raw.prestigeMaxMana, 0, def.prestige?.mana ?? 0);
+      tower.prestigeMaxMana = boundedNumber(raw.prestigeMaxMana, 0, MAX_SAVE_NUMBER, def.prestige?.mana ?? 0);
       tower.prestigeMana = clamp(clampNumber(raw.prestigeMana, 0, 0), 0, tower.prestigeMaxMana || 0);
-      tower.prestigeActive = clampNumber(raw.prestigeActive, 0, 0);
-      tower.prestigeDamageMul = clampNumber(raw.prestigeDamageMul, 1, 1);
-      tower.prestigeGoldTotal = clampNumber(raw.prestigeGoldTotal, 0, 0);
-      tower.uplinkTotalCore = clampNumber(raw.uplinkTotalCore, 0, 0);
-      tower.uplinkTotalGold = clampNumber(raw.uplinkTotalGold, 0, 0);
-      tower.tempASMul = clampNumber(raw.tempASMul, 0.05, 1);
+      tower.prestigeActive = boundedNumber(raw.prestigeActive, 0, 60, 0);
+      tower.prestigeDamageMul = boundedNumber(raw.prestigeDamageMul, 1, 10, 1);
+      tower.prestigeGoldTotal = boundedNumber(raw.prestigeGoldTotal, 0, MAX_SAVE_NUMBER, 0);
+      tower.uplinkTotalCore = boundedNumber(raw.uplinkTotalCore, 0, MAX_SAVE_NUMBER, 0);
+      tower.uplinkTotalGold = boundedNumber(raw.uplinkTotalGold, 0, MAX_SAVE_NUMBER, 0);
+      tower.tempASMul = boundedNumber(raw.tempASMul, 0.05, 10, 1);
       tower.forceChainAll = !!raw.forceChainAll;
       tower.cleaveAll = !!raw.cleaveAll;
-      tower.targetMode = String(raw.targetMode || "first");
+      tower.targetMode = normalizeTargetMode(raw.targetMode);
       tower.lockedTarget = null;
-      tower.secondaryLevel = Math.floor(clampNumber(raw.secondaryLevel, 0, 0));
+      tower.secondaryLevel = Math.floor(boundedNumber(raw.secondaryLevel, 0, MAX_SAVE_WAVE, 0));
       tower.perks = {
-        asMul: clampNumber(raw.perks?.asMul, 0.05, 1),
-        adMul: clampNumber(raw.perks?.adMul, 0.05, 1),
-        magMul: clampNumber(raw.perks?.magMul, 0.05, 1),
-        dmgMul: clampNumber(raw.perks?.dmgMul, 0.05, 1)
+        asMul: boundedNumber(raw.perks?.asMul, 0.05, 10, 1),
+        adMul: boundedNumber(raw.perks?.adMul, 0.05, 10, 1),
+        magMul: boundedNumber(raw.perks?.magMul, 0.05, 10, 1),
+        dmgMul: boundedNumber(raw.perks?.dmgMul, 0.05, 10, 1)
       };
       tower.peelBuffs = {};
       tower.facing = raw.facing === -1 ? -1 : 1;
-      tower.specialUpgrades = Array.isArray(raw.specialUpgrades)
-        ? raw.specialUpgrades.map(upg => ({
-            tier: Math.floor(clampNumber(upg?.tier, 1, 1)),
-            title: String(upg?.title || ""),
-            rarityId: String(upg?.rarityId || "common")
-          }))
-        : [];
-      tower.specialMagicActualMul = clampNumber(raw.specialMagicActualMul, 0.05, 1);
-      tower.specialMagicExpectedMul = clampNumber(raw.specialMagicExpectedMul, 0.05, 1);
+      tower.specialUpgrades = normalizeSpecialUpgrades(raw.specialUpgrades);
+      tower.specialMagicActualMul = boundedNumber(raw.specialMagicActualMul, 0.05, 10, 1);
+      tower.specialMagicExpectedMul = boundedNumber(raw.specialMagicExpectedMul, 0.05, 10, 1);
       return tower;
     }
 
     createRunStateSnapshot(resumeWave){
       this.updateMaxWaveSeen(Math.max(this.currentWave, resumeWave));
       this.runStats.totalKills = Math.max(this.runStats.totalKills, this.totalKills);
+      const safeResumeWave = Math.floor(boundedNumber(resumeWave, 0, MAX_SAVE_WAVE, 0));
       return {
         mapIndex: clampCampaignMapIndex(this.mapIndex),
         gold: Math.floor(clampNumber(this.gold, 0, getStartingGold())),
         coreHP: clampNumber(this.coreHP, 0, START_CORE_HP),
         totalKills: Math.floor(clampNumber(this.totalKills, 0, 0)),
-        resumeWave,
+        resumeWave: safeResumeWave,
+        simTime: boundedNumber(this.simTime, 0, MAX_SAVE_NUMBER, 0),
+        rngState: getRandomState(),
         started: !!this.started && resumeWave > 0,
         endlessMode: !!this.endlessMode,
         isCustomMapRun: !!this.isCustomMapRun,
@@ -1038,7 +1265,7 @@ class Game {
       const activeWave = this.isWaveActive();
       const resumeWave = (!this.started)
         ? 0
-        : Math.max(1, activeWave ? this.currentWave : this.nextWaveNum);
+        : (activeWave ? this.getActiveResumeWave() : Math.max(1, this.nextWaveNum));
       const useCheckpoint = activeWave
         && this.waveStartCheckpoint
         && this.waveStartCheckpoint.resumeWave === resumeWave;
@@ -1088,12 +1315,17 @@ class Game {
         const restored = this.restoreTowerState(tRaw);
         if (restored) this.towers.push(restored);
       }
+      this.tutorialSpecialChoicePending = !this.towers.some(t => t?.def?.id === "archer" && Array.isArray(t.specialUpgrades) && t.specialUpgrades.length > 0);
+      this.markTowerSpatialIndexDirty();
       this.evaluateUniqueTowerTypeChallenge();
+      this.evaluateNoPrestigeChallenge();
 
       this.enemies = [];
       this.projectiles = [];
       this.effects = [];
       this.rings = [];
+      this.attackFlashes = [];
+      this._attackFlashCursor = 0;
       this.floaters = [];
       this.centerQueue = [];
       this.deferredActions = [];
@@ -1122,6 +1354,9 @@ class Game {
       setEndlessScalingEnabled(this.endlessMode);
       this.campaignWinShown = false;
       this.runStartMs = performance.now();
+      this.simTime = boundedNumber(normalizedSave.simTime, 0, MAX_SAVE_NUMBER, 0);
+      setRandomState(normalizedSave.rngState || this.rngSeed);
+      this._simulationAccumulator = 0;
 
       const resumeWave = Math.floor(clampNumber(normalizedSave.resumeWave, 0, 0));
       if (resumeWave > 0) {
@@ -1140,6 +1375,8 @@ class Game {
     }
 
     startFreshRun(options = {}){
+      this.rngSeed = (Number.isFinite(Number(options?.seed)) ? Number(options.seed) : (Date.now() ^ Math.floor(Math.random() * 0xffffffff))) >>> 0;
+      setRandomSeed(this.rngSeed);
       const safeMap = clampCampaignMapIndex(options?.mapIndex);
       this.mapIndex = safeMap;
       const customMapDef = normalizeMapDef(options?.customMapDef);
@@ -1162,7 +1399,7 @@ class Game {
     showWinModal(){
       if (this.winModalOpen) return;
       this.winModalOpen = true;
-      this.runClearSec = Math.max(0, Math.round((performance.now() - this.runStartMs) / 1000));
+      this.runClearSec = Math.max(0, Math.round(boundedNumber(this.simTime, 0, MAX_SAVE_NUMBER, 0)));
       const mm = Math.floor(this.runClearSec / 60);
       const ss = this.runClearSec % 60;
       if (this.winTime) this.winTime.textContent = `${mm}:${String(ss).padStart(2,"0")}`;
@@ -1220,6 +1457,8 @@ class Game {
       this.projectiles=[];
       this.effects=[];
       this.rings=[];
+      this.attackFlashes=[];
+      this._attackFlashCursor=0;
       this.floaters=[];
       this.centerQueue=[];
       this.deferredActions=[];
@@ -1238,11 +1477,15 @@ class Game {
       this.waveEndUplinkNotice = null;
       this.carepackageNotice = null;
       this.waveStartCheckpoint = null;
+      this.nextWaveNowGoldBuff = { mult: 1, timeLeft: 0, maxTime: 0 };
+      this.tutorialSpecialChoicePending = true;
       this._prevWaveActive = false;
       this.endlessMode = false;
       this.campaignWinShown = false;
       this.hideWinModal();
       this.runStartMs = performance.now();
+      this.simTime = 0;
+      this._simulationAccumulator = 0;
       this.gameSpeed = 1.0;
       this.syncSpeedUI(this.gameSpeed);
       setEndlessScalingEnabled(false);
@@ -1253,7 +1496,9 @@ class Game {
       this.refreshUI(true);
     }
 
-    resizeCanvasToDisplaySize(){
+    resizeCanvasToDisplaySize(force=false){
+      const mapKey = `${this.map?.w || 0}x${this.map?.h || 0}`;
+      if (!force && !this._resizeDirty && this._resizeMapKey === mapKey) return;
       const rect=this.cv.getBoundingClientRect();
       const dpr=window.devicePixelRatio || 1;
       const newW=Math.max(2, Math.floor(rect.width * dpr));
@@ -1266,7 +1511,10 @@ class Game {
       this.ctx.imageSmoothingQuality = "high";
       this.tileSize=Math.floor(Math.min(this.cv.width/this.map.w, this.cv.height/this.map.h));
       this.offsetX = Math.floor((this.cv.width - this.tileSize*this.map.w)/2);
-		this.offsetY = Math.floor((this.cv.height - this.tileSize*this.map.h)/2);
+      this.offsetY = Math.floor((this.cv.height - this.tileSize*this.map.h)/2);
+      this._resizeMapKey = mapKey;
+      this._resizeDirty = false;
+      this.refreshMapWipBanner();
 
 		// 300px saÄŸa kaydÄ±r (CSS px -> canvas px)
 
@@ -1278,35 +1526,44 @@ class Game {
       return anyWave || anyEnemy;
     }
 
+    getActiveResumeWave(){
+      const waveNums = [
+        ...this.wavesActive
+          .filter(w => !w.finished)
+          .map(w => Math.floor(Number(w.waveNum) || 0)),
+        ...this.enemies
+          .filter(e => !e.dead && !e.reachedExit)
+          .map(e => Math.floor(Number(e.wave) || 0))
+      ].filter(w => w > 0);
+      return waveNums.length ? Math.min(...waveNums) : Math.max(1, this.nextWaveNum);
+    }
+
+    wavePlanOptions(){
+      return {
+        neoCityOpening: this.mapIndex === 0 && !this.isCustomMapRun && !this.endlessMode,
+        endlessMode: this.endlessMode
+      };
+    }
+
+    atCampaignFinalWave(){
+      return !this.endlessMode && this.currentWave >= this.getCampaignTargetWave();
+    }
+
     queueWave(waveNum){
-      const w = new WaveState(waveNum);
-      if (this.endlessMode && waveNum > 100) {
-        const gradualMul = 1 + Math.min(0.35, Math.max(0, waveNum - 105) * 0.005);
-        const nonBoss = w.plan
-          .filter(p => p.type !== "boss")
-          .map(p => ({ ...p, count: Math.max(1, Math.round(p.count * gradualMul)) }));
-        nonBoss.push({ type: "boss", count: 1 });
-        w.plan = nonBoss;
-        w.cursor = 0;
-        w.remainingInPart = w.plan.length ? w.plan[0].count : 0;
-        const waveCap = getWaveEnemyCap(waveNum);
-        const total = w.plan.reduce((sum, p) => sum + p.count, 0);
-        if (total > waveCap) {
-          const over = Math.min(1, (total - waveCap) / Math.max(1, waveCap));
-          w.spawnInterval *= (1 - 0.35 * over);
-        }
-      }
+      waveNum = Math.floor(boundedNumber(waveNum, 1, MAX_SAVE_WAVE, 1));
+      const w = new WaveState(waveNum, this.wavePlanOptions());
+      const hadActiveState = this.isWaveActive();
       this.wavesActive.push(w);
       this.currentWave = Math.max(this.currentWave, waveNum);
       this.nextWaveNum = Math.max(this.nextWaveNum, waveNum+1);
       this.updateMaxWaveSeen(this.currentWave);
-      this.waveStartCheckpoint = this.createRunStateSnapshot(Math.max(1, waveNum));
+      // Keep the earliest safe checkpoint while waves overlap. Saving from a
+      // later queued wave must never discard the first wave's checkpoint.
+      if (!hadActiveState || !this.waveStartCheckpoint) {
+        this.waveStartCheckpoint = this.createRunStateSnapshot(this.getActiveResumeWave());
+      }
       if (!this.peelUplinkCastsByWave[waveNum]) this.peelUplinkCastsByWave[waveNum] = 0;
       SFX.wave(waveNum);
-      if (Math.random() < 0.35) {
-        const line = LOG_TIPS[Math.floor(Math.random() * LOG_TIPS.length)];
-        this.logEvent(line);
-      }
       this.emitGameEvent(GAME_EVENTS.WAVE_STARTED, {
         waveNum,
         nextWaveNum: this.nextWaveNum,
@@ -1341,7 +1598,7 @@ class Game {
         this.restart();
         return;
       }
-      if(this.winModalOpen) return;
+      if(this.winModalOpen || this.atCampaignFinalWave()) return;
       if(!this.started){ this.start(); return; }
       const alive = this.enemies.filter(e => !e.dead && !e.reachedExit).length;
       const step = Math.max(1, Math.ceil(Math.max(1, alive) / 10));
@@ -1359,11 +1616,13 @@ class Game {
 
     jumpToWaveForTest(waveNum){
       if (this.gameOver) return;
-      const w = Math.max(1, Math.floor(waveNum || 1));
+      const w = Math.floor(boundedNumber(waveNum, 1, MAX_SAVE_WAVE, 1));
       this.enemies = [];
       this.projectiles = [];
       this.effects = [];
       this.rings = [];
+      this.attackFlashes = [];
+      this._attackFlashCursor = 0;
       this.floaters = [];
       this.wavesActive = [];
       this.currentWave = Math.max(0, w - 1);
@@ -1379,7 +1638,7 @@ class Game {
         this.autoQueueTimer=0;
         return;
       }
-      if (!this.endlessMode && !this.campaignWinShown && this.currentWave >= 100) {
+      if (!this.campaignWinShown && this.atCampaignFinalWave()) {
         this.campaignWinShown = true;
         this.runQuestState.campaignCleared = true;
         this.runQuestState.clearedAtWave = Math.max(this.runQuestState.clearedAtWave, this.currentWave);
@@ -1481,8 +1740,8 @@ class Game {
       const mods = { ...waveModifiers(boss.wave), noAffix: true };
 
       const spawnAt = (typeId) => {
-        const jx = (Math.random()-0.5) * 0.45;
-        const jy = (Math.random()-0.5) * 0.45;
+        const jx = (random()-0.5) * 0.45;
+        const jy = (random()-0.5) * 0.45;
         this.spawnEnemy(typeId, boss.wave, { pos: { x: basePos.x + jx, y: basePos.y + jy }, waveMods: mods });
       };
 
@@ -1494,14 +1753,21 @@ class Game {
       if (!enemy || count <= 0) return;
       const mods = { ...waveModifiers(enemy.wave), noAffix: true };
       for (let i=0; i<count; i++) {
-        const jx = (Math.random()-0.5) * 0.35;
-        const jy = (Math.random()-0.5) * 0.35;
+        const jx = (random()-0.5) * 0.35;
+        const jy = (random()-0.5) * 0.35;
         this.spawnEnemy("runner", enemy.wave, { pos: { x: enemy.x + jx, y: enemy.y + jy }, waveMods: mods });
       }
     }
 
     rebuildTowerSpatialIndex(){
+      if (!this.towerSpatial) return;
+      if (!this._towerSpatialDirty && this.towerSpatial) return;
       this.towerSpatial.rebuild(this.towers, t => !!t);
+      this._towerSpatialDirty = false;
+    }
+
+    markTowerSpatialIndexDirty(){
+      this._towerSpatialDirty = true;
     }
 
     rebuildEnemySpatialIndex(){
@@ -1524,6 +1790,7 @@ class Game {
 
     getTowersInRange(x, y, radius, out = null){
       const buf = out || this._towerRangeScratch;
+      if (this._towerSpatialDirty) this.rebuildTowerSpatialIndex();
       if (!this.towerSpatial) {
         buf.length = 0;
         const r2 = radius * radius;
@@ -1772,6 +2039,7 @@ class Game {
         this.gold -= cost;
         const placedTower = new Tower(this.selectedTowerDef, g.x, g.y, this);
         this.towers.push(placedTower);
+        this.markTowerSpatialIndexDirty();
         this.recordTowerBuilt(this.selectedTowerDef.id, g.x, g.y);
         this.evaluateUniqueTowerTypeChallenge();
         if (this.selectedTowerDef.id === "sniper") this.runQuestState.sniperPurchased = true;
@@ -1798,6 +2066,7 @@ class Game {
       const refund=Math.round(t.spentGold*0.50);
       this.gold += refund;
       this.towers = this.towers.filter(x=>x!==t);
+      this.markTowerSpatialIndexDirty();
       this.selectedTowerInstance=null;
       this.notifyTutorialAction("sell_selected_tower", {
         towerId: t.def?.id || null,
@@ -1820,17 +2089,26 @@ class Game {
       this.uiHover.upgrade = false;
       this.uiHover.fast = false;
 
+      const scriptedTutorialChoice = this.shouldUseTutorialScriptedSpecialChoice()
+        && !this.isCustomMapRun
+        && this.mapIndex === 0
+        && this.tutorialSpecialChoicePending
+        && tower?.def?.id === "archer"
+        && Number(tower?.level) === 5;
       const choices = buildChoicesForTower(tower, tier, {
-        forceFixedByCode: !!this.tutorialForceFixedSpecialChoices
+        forceFixedByCode: scriptedTutorialChoice
       });
 
       openModal(
         `${tower.def.name} - Lv ${tower.level} Special Upgrade <span class="tierBadge">Tier ${tier}</span>`,
-        `Choose 1 option.`,
+        tower.canChooseArcherPath() && tower.level === ARCHER_SPECIALIZATION_LEVEL
+          ? "Choose one Special Upgrade. Afterwards, pick a free specialization in the tower panel whenever you’re ready."
+          : "Choose 1 option.",
         choices,
         (choice) => {
           this.hoverSpecialChoice = null;
           choice.apply(tower);
+          if (scriptedTutorialChoice) this.tutorialSpecialChoicePending = false;
           closeModal();
           this.gameSpeed = this.prevSpeedBeforeModal;
           this.syncSpeedUI(this.gameSpeed);
@@ -1904,6 +2182,7 @@ class Game {
       this.autoQueueTimer=0;
 
       this.towers=[];
+      this.markTowerSpatialIndexDirty();
       this.enemies=[];
       this.projectiles=[];
       this.effects=[];
@@ -1928,6 +2207,9 @@ class Game {
       this.hideWinModal();
       this.hideGameOverModal();
       this.runStartMs = performance.now();
+      this.simTime = 0;
+      this._simulationAccumulator = 0;
+      this.nextWaveNowGoldBuff = { mult: 1, timeLeft: 0, maxTime: 0 };
       this.gameSpeed = 1.0;
       this.syncSpeedUI(this.gameSpeed);
       setEndlessScalingEnabled(false);
@@ -1945,7 +2227,68 @@ class Game {
       this.refreshUI(true);
     }
 
+    isLowEffectsEnabled(){
+      if (typeof window === "undefined") return false;
+      if (window.__armtdLowEffects === true) return true;
+      try {
+        return !!window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    getVisualBudget(kind){
+      const base = VISUAL_BUDGETS[kind] || 0;
+      return this.isLowEffectsEnabled() ? Math.max(1, Math.ceil(base * 0.5)) : base;
+    }
+
+    trimTransientVisuals(){
+      const dropped = this._visualBudgetDrops || { effects: 0, floaters: 0, centerQueue: 0, rings: 0 };
+      const trimPooled = (items, limit, release, kind, canDrop = () => true) => {
+        if (!Array.isArray(items) || items.length <= limit) return;
+        let overflow = items.length - limit;
+        for (let i = 0; i < items.length && overflow > 0;) {
+          const item = items[i];
+          if (!canDrop(item)) {
+            i += 1;
+            continue;
+          }
+          items.splice(i, 1);
+          if (typeof release === "function") release(item);
+          dropped[kind] = (dropped[kind] || 0) + 1;
+          overflow -= 1;
+        }
+      };
+      trimPooled(
+        this.effects,
+        this.getVisualBudget("effects"),
+        releaseAnyEffect,
+        "effects",
+        (item) => typeof item?.onHit !== "function"
+      );
+      // Rings with onHit carry combat logic and must finish their simulation.
+      // Visual-only rings can be budgeted safely without changing combat values.
+      trimPooled(
+        this.rings,
+        this.getVisualBudget("rings"),
+        releaseEffectRing,
+        "rings",
+        (item) => typeof item?.onHit !== "function"
+      );
+      trimPooled(this.floaters, this.getVisualBudget("floaters"), releaseFloatingText, "floaters");
+      if (Array.isArray(this.centerQueue)) {
+        const limit = this.getVisualBudget("centerQueue");
+        if (this.centerQueue.length > limit) {
+          const removeCount = this.centerQueue.length - limit;
+          this.centerQueue.splice(0, removeCount);
+          dropped.centerQueue = (dropped.centerQueue || 0) + removeCount;
+        }
+      }
+      this._visualBudgetDrops = dropped;
+    }
+
     update(dt){
+      this.updateAttackFlashes(dt);
       this._statsFlushTimer += Math.max(0, Number(dt) || 0);
       if (this._statsDirty && this._statsFlushTimer >= this._statsFlushInterval) {
         this.persistLifetimeStats(true);
@@ -1963,6 +2306,7 @@ class Game {
 
       const sdt = dt * this.gameSpeed;
       if(sdt <= 0) return;
+      this.simTime = Math.max(0, Number(this.simTime) || 0) + sdt;
 
       this.autoQueueIfNeeded(sdt);
 
@@ -1971,7 +2315,8 @@ class Game {
         if(w.finished) continue;
 
         w.spawnTimer -= sdt;
-        if(w.spawnTimer <= 0){
+        let spawnedThisStep = 0;
+        while(w.spawnTimer <= 0 && !w.finished && spawnedThisStep < MAX_SPAWNS_PER_WAVE_STEP){
           while(!w.finished && w.remainingInPart <= 0){
             w.nextPart();
           }
@@ -1991,7 +2336,6 @@ class Game {
             const prev = Math.max(1, w.waveNum-1);
             const hpByPrevWave = Math.max(1, Math.round(computePrevWaveTotals(prev).totalHP));
             let hp = hpByPrevWave;
-            if (w.waveNum === 100 && !isBigBoss) hp *= 10;
             const totals = computePrevWaveTotals(prev);
             const wealth = Math.max(50, Math.round(totals.totalWealth * wealthMult));
 
@@ -2009,8 +2353,9 @@ class Game {
 
           w.remainingInPart -= 1;
           w.spawnedCount += 1;
+          spawnedThisStep += 1;
           const burst = (w.burstEvery > 0) && (w.spawnedCount % w.burstEvery === 0);
-          w.spawnTimer = w.spawnInterval * (burst ? CFG.SPAWN_BURST_INTERVAL_MUL : 1);
+          w.spawnTimer += w.spawnInterval * (burst ? CFG.SPAWN_BURST_INTERVAL_MUL : 1);
         }
       }
 
@@ -2058,9 +2403,9 @@ class Game {
       if (hasMageAura) {
         for (const m of this.towers) {
           if (m.def.id !== "mage" || m.prestigeActive <= 0) continue;
-          const magic = Math.max(0, (m.magicBonus || 0) * (m.perks?.magMul ?? 1) * (m.peelMul?.("mag") ?? 1));
-          const auraMul = magePrestigeAuraMulFromMagic(magic);
-          const auraRange = m.range + magePrestigeAuraRangeBonusFromMagic(magic);
+          const aura = magePrestigeAuraProfile();
+          const auraMul = aura.manaMultiplier;
+          const auraRange = m.range + aura.rangeBonus;
           const inRange = this.getTowersInRange(m.x, m.y, auraRange, this._towerRangeScratch);
           for (const t of inRange) {
             if (t === m) continue;
@@ -2116,6 +2461,7 @@ class Game {
         if ((c.delay ?? 0) < 0) c.life -= dt;
       }
       compactInPlace(this.centerQueue, c => (c.life ?? 0) > 0);
+      this.trimTransientVisuals();
 
       if (this.nextWaveNowGoldBuff.timeLeft > 0) {
         this.nextWaveNowGoldBuff.timeLeft = Math.max(0, this.nextWaveNowGoldBuff.timeLeft - sdt);
@@ -2182,11 +2528,6 @@ class Game {
       const line = document.createElement("div");
       line.className = "logLine";
       line.textContent = text;
-      if (text === "Signal online: towers are operational.") {
-        line.classList.add("logCheatToggle");
-        line.title = "Toggle test panel";
-        line.addEventListener("click", () => this.uiAdapter.toggleCheatPanel());
-      }
       this.logEl.appendChild(line);
 
       while (this.logEl.children.length > this.logMax) {
@@ -2591,20 +2932,25 @@ class Game {
       ctx.restore();
     }
 
-    draw(){
-      const ctx=this.ctx;
-      ctx.clearRect(0,0,this.cv.width,this.cv.height);
-      const baseOffsetX = this.offsetX;
-      const baseOffsetY = this.offsetY;
-      const shake = this.getScreenShakeOffset();
-      if (shake.x !== 0 || shake.y !== 0) {
-        this.offsetX = baseOffsetX + shake.x;
-        this.offsetY = baseOffsetY + shake.y;
-      }
+    getStaticMapCacheKey(){
+      const bgSrc = this.mapBg?.currentSrc || this.mapBg?.src || "";
+      return [
+        this.map?.w || 0,
+        this.map?.h || 0,
+        this.tileSize || 0,
+        this.useMapBackground ? 1 : 0,
+        this.mapBgReady ? 1 : 0,
+        this.mapBg?.width || 0,
+        this.mapBg?.height || 0,
+        bgSrc
+      ].join("|");
+    }
+
+    renderStaticMapLayer(ctx, ox, oy){
+      if (!ctx || !this.map || !(this.tileSize > 0)) return;
+      this._staticMapRenderCount = (this._staticMapRenderCount || 0) + 1;
 
       if (this.useMapBackground && this.mapBgReady && this.mapBg && this.tileSize > 0) {
-        const ox = this.offsetX;
-        const oy = this.offsetY;
         const w = this.map.w * this.tileSize;
         const h = this.map.h * this.tileSize;
         const bgDef = this.getMapBackgroundDef();
@@ -2619,14 +2965,12 @@ class Game {
         const dx = ox + (w - dw) / 2;
         const dy = oy + (h - dh) / 2;
         ctx.drawImage(this.mapBg, sx, sy, sw, sh, dx, dy, dw, dh);
-        // no path glow overlay
       }
 
-      // grid
       for(let y=0;y<this.map.h;y++){
         for(let x=0;x<this.map.w;x++){
-          const px=this.offsetX + x*this.tileSize;
-          const py=this.offsetY + y*this.tileSize;
+          const px=ox + x*this.tileSize;
+          const py=oy + y*this.tileSize;
           const isPath=this.map.isPath(x,y);
           const isObstacle = this.map.isObstacle ? this.map.isObstacle(x, y) : (this.map.grid?.[y]?.[x] === 2);
           ctx.fillStyle = isPath
@@ -2644,51 +2988,270 @@ class Game {
             ctx.lineTo(px + pad, py + this.tileSize - pad);
             ctx.stroke();
           }
-
         }
       }
 
-      // grid lines
       ctx.strokeStyle="rgba(255,255,255,0.06)";
       ctx.lineWidth=1;
-      const ox=this.offsetX + 0.5;
-      const oy=this.offsetY + 0.5;
-
+      const lineOx=ox + 0.5;
+      const lineOy=oy + 0.5;
       for(let x=0;x<=this.map.w;x++){
-        const px=ox + x*this.tileSize;
+        const px=lineOx + x*this.tileSize;
         ctx.beginPath();
-        ctx.moveTo(px, oy);
-        ctx.lineTo(px, oy + this.map.h*this.tileSize);
+        ctx.moveTo(px, lineOy);
+        ctx.lineTo(px, lineOy + this.map.h*this.tileSize);
         ctx.stroke();
       }
       for(let y=0;y<=this.map.h;y++){
-        const py=oy + y*this.tileSize;
+        const py=lineOy + y*this.tileSize;
         ctx.beginPath();
-        ctx.moveTo(ox, py);
-        ctx.lineTo(ox + this.map.w*this.tileSize, py);
+        ctx.moveTo(lineOx, py);
+        ctx.lineTo(lineOx + this.map.w*this.tileSize, py);
         ctx.stroke();
       }
 
-      // entrance/exit
-      const drawMarker=(gx,gy,color)=>{
-        const px=this.offsetX + gx*this.tileSize;
-        const py=this.offsetY + gy*this.tileSize;
-        ctx.fillStyle=color;
-        ctx.fillRect(px+2,py+2,this.tileSize-4,this.tileSize-4);
+      const drawEndpoint = (gx, gy, kind) => {
+        const px=ox + gx*this.tileSize;
+        const py=oy + gy*this.tileSize;
+        const isEntrance = kind === "entrance";
+        const fill = isEntrance ? "rgba(34,197,94,0.32)" : "rgba(239,68,68,0.38)";
+        const rim = isEntrance ? "rgba(134,239,172,0.92)" : "rgba(254,202,202,0.95)";
+        const glow = isEntrance ? "rgba(34,197,94,0.34)" : "rgba(239,68,68,0.38)";
+        const inset = Math.max(3, this.tileSize * 0.14);
+        const cx = px + this.tileSize * 0.5;
+        const cy = py + this.tileSize * 0.5;
+        const radius = Math.max(4, this.tileSize * 0.28);
+
+        ctx.save();
+        ctx.fillStyle = fill;
+        ctx.strokeStyle = rim;
+        ctx.lineWidth = Math.max(1.5, this.tileSize * 0.055);
+        ctx.shadowBlur = Math.max(6, this.tileSize * 0.32);
+        ctx.shadowColor = glow;
+        ctx.fillRect(px + inset, py + inset, this.tileSize - inset * 2, this.tileSize - inset * 2);
+        ctx.strokeRect(px + inset, py + inset, this.tileSize - inset * 2, this.tileSize - inset * 2);
+        ctx.shadowBlur = 0;
+        ctx.beginPath();
+        if (isEntrance) {
+          ctx.moveTo(cx - radius * 0.55, cy - radius * 0.72);
+          ctx.lineTo(cx + radius * 0.72, cy);
+          ctx.lineTo(cx - radius * 0.55, cy + radius * 0.72);
+        } else {
+          ctx.moveTo(cx, cy - radius);
+          ctx.lineTo(cx + radius, cy);
+          ctx.lineTo(cx, cy + radius);
+          ctx.lineTo(cx - radius, cy);
+          ctx.closePath();
+        }
+        ctx.stroke();
+        ctx.restore();
       };
-      drawMarker(this.map.entrance.x,this.map.entrance.y,"rgba(34,197,94,0.35)");
-      drawMarker(this.map.exit.x,this.map.exit.y,"rgba(239,68,68,0.35)");
+      drawEndpoint(this.map.entrance.x, this.map.entrance.y, "entrance");
+      drawEndpoint(this.map.exit.x, this.map.exit.y, "exit");
+    }
+
+    ensureStaticMapCache(){
+      if (!this.staticMapCanvas || !this.cv || !this.staticMapCtx) return null;
+      const width = Math.max(2, Math.ceil((this.map?.w || 0) * (this.tileSize || 0)));
+      const height = Math.max(2, Math.ceil((this.map?.h || 0) * (this.tileSize || 0)));
+      const key = this.getStaticMapCacheKey();
+      if (this._staticMapCacheKey === key
+        && this.staticMapCanvas.width === width
+        && this.staticMapCanvas.height === height) {
+        return this.staticMapCanvas;
+      }
+      this.staticMapCanvas.width = width;
+      this.staticMapCanvas.height = height;
+      this.staticMapCtx.clearRect(0, 0, width, height);
+      this.renderStaticMapLayer(this.staticMapCtx, 0, 0);
+      this._staticMapCacheKey = key;
+      return this.staticMapCanvas;
+    }
+
+    drawCoreThreatIndicator(ctx, tNow){
+      const pathLength = Math.max(1, (this.map?.path?.length || 1) - 1);
+      let frontEnemy = null;
+      let frontProgress = 0;
+      for (const enemy of this.enemies) {
+        if (!enemy || enemy.dead || enemy.reachedExit) continue;
+        const progress = clamp((Number(enemy.pathIndex) || 0) / pathLength, 0, 1);
+        if (progress > frontProgress) {
+          frontProgress = progress;
+          frontEnemy = enemy;
+        }
+      }
+      if (!frontEnemy || frontProgress < 0.68) return;
+
+      const intensity = clamp((frontProgress - 0.68) / 0.32, 0, 1);
+      const lowEffects = this.isLowEffectsEnabled();
+      const pulse = lowEffects ? 0.72 : (0.52 + 0.48 * Math.sin(tNow * (5.5 + intensity * 4.0)));
+      const coreX = this.offsetX + (this.map.exit.x + 0.5) * this.tileSize;
+      const coreY = this.offsetY + (this.map.exit.y + 0.5) * this.tileSize;
+      const baseRadius = this.tileSize * (0.46 + intensity * 0.22);
+
+      ctx.save();
+      ctx.strokeStyle = `rgba(248,113,113,${0.26 + intensity * 0.34})`;
+      ctx.lineWidth = Math.max(2, this.tileSize * 0.065);
+      ctx.shadowBlur = lowEffects ? 0 : Math.max(8, this.tileSize * (0.36 + intensity * 0.34));
+      ctx.shadowColor = `rgba(239,68,68,${0.42 + intensity * 0.35})`;
+      ctx.beginPath();
+      ctx.arc(coreX, coreY, baseRadius * (1.08 + 0.16 * pulse), 0, Math.PI * 2);
+      ctx.stroke();
+
+      if (!lowEffects && intensity >= 0.35) {
+        const enemyX = this.offsetX + frontEnemy.x * this.tileSize;
+        const enemyY = this.offsetY + frontEnemy.y * this.tileSize;
+        ctx.setLineDash([Math.max(3, this.tileSize * 0.12), Math.max(4, this.tileSize * 0.16)]);
+        ctx.lineDashOffset = -tNow * this.tileSize * 0.9;
+        ctx.strokeStyle = `rgba(251,113,133,${0.12 + intensity * 0.22})`;
+        ctx.lineWidth = Math.max(1.3, this.tileSize * 0.035);
+        ctx.beginPath();
+        ctx.moveTo(enemyX, enemyY);
+        ctx.lineTo(coreX, coreY);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    drawSelectedTowerTargetAssist(ctx, tower, tNow){
+      const target = tower?.lockedTarget;
+      if (!target || target.dead || target.reachedExit) return;
+      const ax = this.offsetX + tower.x * this.tileSize;
+      const ay = this.offsetY + tower.y * this.tileSize;
+      const bx = this.offsetX + target.x * this.tileSize;
+      const by = this.offsetY + target.y * this.tileSize;
+      const lowEffects = this.isLowEffectsEnabled();
+      const pulse = lowEffects ? 0.72 : (0.55 + 0.45 * Math.sin(tNow * 7.0));
+
+      ctx.save();
+      ctx.setLineDash([Math.max(4, this.tileSize * 0.15), Math.max(5, this.tileSize * 0.20)]);
+      ctx.lineDashOffset = -tNow * this.tileSize * 1.15;
+      ctx.strokeStyle = `rgba(125,211,252,${0.42 + 0.30 * pulse})`;
+      ctx.lineWidth = Math.max(1.3, this.tileSize * 0.045);
+      ctx.shadowBlur = lowEffects ? 0 : Math.max(5, this.tileSize * 0.22);
+      ctx.shadowColor = "rgba(56,189,248,0.64)";
+      ctx.beginPath();
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(bx, by);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = `rgba(186,230,253,${0.55 + 0.35 * pulse})`;
+      ctx.beginPath();
+      ctx.arc(bx, by, Math.max(2.5, this.tileSize * 0.09), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    drawAttackFlashes(ctx, lowEffects = this.isLowEffectsEnabled()){
+      for (const flash of this.attackFlashes) {
+        if (!flash || flash.life <= 0 || flash.maxLife <= 0) continue;
+        const a = clamp(flash.life / flash.maxLife, 0, 1);
+        const progress = 1 - a;
+        const px = this.offsetX + flash.x * this.tileSize;
+        const py = this.offsetY + flash.y * this.tileSize;
+        const angle = Math.atan2(flash.dy || 0, flash.dx || 1);
+        const baseColor = flash.color || "rgba(255,255,255,0.92)";
+        const glowColor = baseColor.replace(/[\d.]+\)$/, `${(0.22 + a * 0.42).toFixed(3)})`);
+        const brightColor = baseColor.replace(/[\d.]+\)$/, `${(0.62 + a * 0.36).toFixed(3)})`);
+        const length = this.tileSize * (flash.isCritical ? 0.48 : 0.36) * (0.75 + progress * 0.58);
+        const halfWidth = this.tileSize * (flash.isCritical ? 0.19 : 0.13) * (0.82 + progress * 0.20);
+
+        ctx.save();
+        ctx.translate(px, py);
+        ctx.rotate(angle);
+        ctx.globalAlpha = a;
+        ctx.lineCap = "round";
+        if (!lowEffects) {
+          ctx.shadowBlur = Math.max(5, halfWidth * 3.4);
+          ctx.shadowColor = baseColor;
+        }
+
+        ctx.fillStyle = glowColor;
+        ctx.beginPath();
+        ctx.moveTo(-this.tileSize * 0.08, -halfWidth);
+        ctx.lineTo(length, 0);
+        ctx.lineTo(-this.tileSize * 0.08, halfWidth);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.strokeStyle = brightColor;
+        ctx.lineWidth = Math.max(1.4, halfWidth * 0.38);
+        ctx.beginPath();
+        ctx.moveTo(-this.tileSize * 0.10, 0);
+        ctx.lineTo(length * 0.90, 0);
+        ctx.stroke();
+
+        if (flash.kind === "mage") {
+          ctx.lineWidth = Math.max(1.1, halfWidth * 0.22);
+          ctx.beginPath();
+          ctx.arc(0, 0, Math.max(2, halfWidth * 1.1), -Math.PI * 0.70, Math.PI * 0.70);
+          ctx.stroke();
+        } else if (flash.kind === "poison") {
+          ctx.fillStyle = brightColor;
+          ctx.beginPath();
+          ctx.arc(length * 0.35, -halfWidth * 0.62, Math.max(1.2, halfWidth * 0.20), 0, Math.PI * 2);
+          ctx.arc(length * 0.58, halfWidth * 0.45, Math.max(1.0, halfWidth * 0.16), 0, Math.PI * 2);
+          ctx.fill();
+        } else if (flash.kind === "breaker") {
+          ctx.lineWidth = Math.max(1.2, halfWidth * 0.24);
+          ctx.beginPath();
+          ctx.moveTo(length * 0.42, -halfWidth * 1.2);
+          ctx.lineTo(length * 0.62, halfWidth * 1.2);
+          ctx.moveTo(length * 0.42, halfWidth * 1.2);
+          ctx.lineTo(length * 0.62, -halfWidth * 1.2);
+          ctx.stroke();
+        } else if (flash.kind === "sniper") {
+          ctx.lineWidth = Math.max(1.2, halfWidth * 0.22);
+          ctx.beginPath();
+          ctx.moveTo(-length * 0.32, 0);
+          ctx.lineTo(length * 1.22, 0);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    }
+
+    draw(){
+      const ctx=this.ctx;
+      ctx.clearRect(0,0,this.cv.width,this.cv.height);
+      const tNow = now();
+      const reducedEffects = this.isLowEffectsEnabled();
+      const staticMapLayer = this.ensureStaticMapCache();
+      const baseOffsetX = this.offsetX;
+      const baseOffsetY = this.offsetY;
+      const shake = this.getScreenShakeOffset();
+      if (shake.x !== 0 || shake.y !== 0) {
+        this.offsetX = baseOffsetX + shake.x;
+        this.offsetY = baseOffsetY + shake.y;
+      }
+
+      if (staticMapLayer) {
+        ctx.drawImage(staticMapLayer, baseOffsetX + shake.x, baseOffsetY + shake.y);
+      } else {
+        this.renderStaticMapLayer(ctx, this.offsetX, this.offsetY);
+      }
+      this.drawCoreThreatIndicator(ctx, tNow);
 
       // selected tower range
       if(this.selectedTowerInstance){
         const t=this.selectedTowerInstance;
         const cx=this.offsetX + t.x*this.tileSize;
         const cy=this.offsetY + t.y*this.tileSize;
-        ctx.strokeStyle="rgba(56,189,248,0.25)";
-        ctx.lineWidth=2;
+        const lowEffects = reducedEffects;
+        const pulse = lowEffects ? 0.72 : (0.58 + 0.42 * Math.sin(tNow * 3.8));
+        ctx.fillStyle = "rgba(56,189,248,0.035)";
+        ctx.beginPath();
+        ctx.arc(cx,cy,t.range*this.tileSize,0,Math.PI*2);
+        ctx.fill();
+        ctx.strokeStyle=`rgba(125,211,252,${0.25 + 0.22 * pulse})`;
+        ctx.lineWidth=Math.max(1.5, this.tileSize * 0.045);
+        ctx.setLineDash([Math.max(4, this.tileSize * 0.15), Math.max(4, this.tileSize * 0.18)]);
+        ctx.lineDashOffset = -tNow * this.tileSize * 0.6;
         ctx.beginPath();
         ctx.arc(cx,cy,t.range*this.tileSize,0,Math.PI*2);
         ctx.stroke();
+        ctx.setLineDash([]);
+        this.drawSelectedTowerTargetAssist(ctx, t, tNow);
       }
 
       if(this.selectedTowerDef && this.hoverGrid){
@@ -2726,7 +3289,9 @@ class Game {
       }
 
       // rings
-      for(const r of this.rings){
+      const ringDrawStart = Math.max(0, this.rings.length - this.getVisualBudget("rings"));
+      for(let ringIndex = ringDrawStart; ringIndex < this.rings.length; ringIndex += 1){
+        const r = this.rings[ringIndex];
         const cx=this.offsetX + r.x*this.tileSize;
         const cy=this.offsetY + r.y*this.tileSize;
         const a=r.alpha();
@@ -2738,7 +3303,6 @@ class Game {
       }
 
       // peel buff links
-      const tNow = now();
       for (const t of this.towers) {
         const buffs = t.peelBuffs ? Object.entries(t.peelBuffs).filter(([, b]) => b.time > 0) : [];
         if (!buffs.length) continue;
@@ -2891,6 +3455,10 @@ class Game {
         }
       }
 
+      // Render-only muzzle flashes: they deliberately sit behind enemies and
+      // projectiles, so they communicate a shot without obscuring its target.
+      this.drawAttackFlashes(ctx, reducedEffects);
+
       // enemies
       for(const e of this.enemies){
         const px=this.offsetX + e.x*this.tileSize;
@@ -2969,6 +3537,90 @@ class Game {
         ctx.globalAlpha = 1;
         ctx.restore();
 
+        // Each enemy type keeps the shared lighting treatment above, then gets
+        // a small silhouette cue that remains legible even in a crowded wave.
+        const lowEffects = reducedEffects;
+        const detailPulse = lowEffects ? 0.70 : (0.56 + 0.44 * Math.sin((tNow - e.birthT) * 5.4));
+        ctx.save();
+        ctx.translate(px, py);
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        if (e.isBoss) {
+          const spin = lowEffects ? 0 : (tNow - e.birthT) * 0.65;
+          ctx.rotate(spin);
+          ctx.strokeStyle = `rgba(255,248,178,${0.72 + 0.22 * detailPulse})`;
+          ctx.lineWidth = Math.max(1.5, radius * 0.10);
+          for (let spike = 0; spike < 6; spike += 1) {
+            const angle = -Math.PI / 2 + (Math.PI * 2 * spike) / 6;
+            ctx.beginPath();
+            ctx.moveTo(Math.cos(angle) * radius * 0.62, Math.sin(angle) * radius * 0.62);
+            ctx.lineTo(Math.cos(angle) * radius * (0.92 + 0.10 * detailPulse), Math.sin(angle) * radius * (0.92 + 0.10 * detailPulse));
+            ctx.stroke();
+          }
+          ctx.fillStyle = "rgba(15,23,42,0.76)";
+          ctx.beginPath();
+          ctx.arc(0, 0, radius * 0.26, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "rgba(255,248,178,0.95)";
+          ctx.beginPath();
+          ctx.arc(0, 0, radius * 0.10, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (e.typeId === "tank") {
+          ctx.fillStyle = "rgba(15,23,42,0.38)";
+          ctx.strokeStyle = "rgba(226,232,240,0.78)";
+          ctx.lineWidth = Math.max(1.4, radius * 0.09);
+          ctx.beginPath();
+          for (let side = 0; side < 6; side += 1) {
+            const angle = -Math.PI / 2 + (Math.PI * 2 * side) / 6;
+            const x = Math.cos(angle) * radius * 0.68;
+            const y = Math.sin(angle) * radius * 0.68;
+            if (side === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = "rgba(241,245,249,0.88)";
+          ctx.beginPath();
+          ctx.arc(0, 0, radius * 0.17, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (e.typeId === "siphon") {
+          const spin = lowEffects ? 0 : (tNow - e.birthT) * 2.4;
+          ctx.rotate(spin);
+          ctx.strokeStyle = `rgba(186,230,253,${0.62 + 0.24 * detailPulse})`;
+          ctx.lineWidth = Math.max(1.25, radius * 0.075);
+          ctx.beginPath();
+          ctx.arc(0, 0, radius * 0.62, -0.30, Math.PI * 0.78);
+          ctx.arc(0, 0, radius * 0.62, Math.PI - 0.30, Math.PI * 1.78);
+          ctx.stroke();
+          ctx.fillStyle = "rgba(224,242,254,0.90)";
+          ctx.beginPath();
+          ctx.arc(0, 0, radius * 0.16, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "rgba(2,132,199,0.94)";
+          ctx.beginPath();
+          ctx.arc(0, 0, radius * 0.07, 0, Math.PI * 2);
+          ctx.fill();
+        } else {
+          // Runners use a visor and speed chevrons instead of extra size, so
+          // their quick movement is recognizable without hiding the path.
+          ctx.strokeStyle = `rgba(253,242,248,${0.62 + 0.24 * detailPulse})`;
+          ctx.lineWidth = Math.max(1.2, radius * 0.085);
+          ctx.beginPath();
+          ctx.moveTo(-radius * 1.10, -radius * 0.30);
+          ctx.lineTo(-radius * 0.72, 0);
+          ctx.lineTo(-radius * 1.10, radius * 0.30);
+          ctx.moveTo(-radius * 0.78, -radius * 0.18);
+          ctx.lineTo(-radius * 0.52, 0);
+          ctx.lineTo(-radius * 0.78, radius * 0.18);
+          ctx.stroke();
+          ctx.fillStyle = "rgba(15,23,42,0.72)";
+          ctx.fillRect(-radius * 0.48, -radius * 0.22, radius * 0.96, radius * 0.31);
+          ctx.fillStyle = "rgba(251,207,232,0.94)";
+          ctx.fillRect(-radius * 0.28, -radius * 0.13, radius * 0.56, radius * 0.09);
+        }
+        ctx.restore();
+
         ctx.lineWidth = Math.max(2, Math.floor(radius * 0.18));
         ctx.strokeStyle = "rgba(15,23,42,0.88)";
         ctx.beginPath();
@@ -2979,15 +3631,6 @@ class Game {
         ctx.beginPath();
         ctx.arc(px, py, radius*0.94, -0.20, Math.PI*1.54);
         ctx.stroke();
-
-        const hpPct=clamp(e.hp/e.maxHP,0,1);
-        ctx.fillStyle="rgba(34,197,94,0.75)";
-        ctx.fillRect(px-radius, py-radius-10, (radius*2)*hpPct, 4);
-        ctx.fillStyle="rgba(255,255,255,0.12)";
-        ctx.fillRect(px-radius+(radius*2)*hpPct, py-radius-10, (radius*2)*(1-hpPct), 4);
-        ctx.strokeStyle="rgba(15,23,42,0.85)";
-        ctx.lineWidth=1;
-        ctx.strokeRect(px-radius, py-radius-10, radius*2, 4);
 
         if (e.isBoss && e.bossSkills) {
           const activeSkills = Object.values(e.bossSkills).filter(s => s.active);
@@ -3135,12 +3778,57 @@ class Game {
           ctx.arc(px, py, radius*1.35, 0, Math.PI*2);
           ctx.fill();
 
-          ctx.font = `bold ${Math.max(10, Math.floor(radius*0.9))}px system-ui`;
+          const stacks = Math.max(0, Number(e.poisonStacks) || 0);
+          const stackText = stacks >= 10
+            ? String(Math.floor(stacks))
+            : stacks.toFixed(1).replace(/\.0$/, "");
+          const rawTick = stacks * e.poisonPerTick * (1 - (e.poisonResist || 0));
+          const dps = Math.round(applyMagicDamage(rawTick, e.mr, e.poisonMagicPen) * e.damageTakenMultiplier / e.poisonTickCD);
+          const poisonLabel = `☣ ${stackText} • ${formatCompact(dps)}/s`;
+          const segmentCount = Math.min(6, Math.max(1, Math.ceil(stacks)));
+          ctx.save();
+          ctx.strokeStyle = `rgba(74,222,128,${0.48 + 0.34 * pp})`;
+          ctx.lineWidth = Math.max(1.2, radius * 0.06);
+          for (let segment = 0; segment < segmentCount; segment += 1) {
+            const start = -Math.PI / 2 + (Math.PI * 2 * segment) / 6 + 0.07;
+            const end = start + (Math.PI * 2) / 6 - 0.14;
+            ctx.beginPath();
+            ctx.arc(px, py, radius * 1.24, start, end);
+            ctx.stroke();
+          }
+
+          const poisonFont = Math.max(9, Math.floor(radius * 0.42));
+          ctx.font = `800 ${poisonFont}px system-ui`;
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
-          ctx.fillStyle = "rgba(34,197,94,0.98)";
-          const dps = Math.round(e.poisonStacks * e.poisonPerTick * (1 - (e.poisonResist || 0)) * 10);
-          ctx.fillText(String(dps), px, py - radius*1.55);
+          const badgeW = Math.max(radius * 1.65, ctx.measureText(poisonLabel).width + 12);
+          const badgeH = Math.max(13, poisonFont + 7);
+          const badgeX = px - badgeW / 2;
+          const badgeY = py - radius - (e.isBoss
+            ? Math.max(28, this.tileSize * 0.86)
+            : Math.max(17, this.tileSize * 0.55));
+          const badgeR = Math.min(badgeH / 2, 7);
+          ctx.fillStyle = "rgba(6,78,59,0.78)";
+          ctx.beginPath();
+          ctx.moveTo(badgeX + badgeR, badgeY - badgeH / 2);
+          ctx.lineTo(badgeX + badgeW - badgeR, badgeY - badgeH / 2);
+          ctx.quadraticCurveTo(badgeX + badgeW, badgeY - badgeH / 2, badgeX + badgeW, badgeY);
+          ctx.quadraticCurveTo(badgeX + badgeW, badgeY + badgeH / 2, badgeX + badgeW - badgeR, badgeY + badgeH / 2);
+          ctx.lineTo(badgeX + badgeR, badgeY + badgeH / 2);
+          ctx.quadraticCurveTo(badgeX, badgeY + badgeH / 2, badgeX, badgeY);
+          ctx.quadraticCurveTo(badgeX, badgeY - badgeH / 2, badgeX + badgeR, badgeY - badgeH / 2);
+          ctx.closePath();
+          ctx.fill();
+          ctx.strokeStyle = `rgba(74,222,128,${0.60 + 0.28 * pp})`;
+          ctx.lineWidth = 1;
+          ctx.stroke();
+          if (!lowEffects) {
+            ctx.shadowBlur = Math.max(4, poisonFont * 0.8);
+            ctx.shadowColor = "rgba(34,197,94,0.55)";
+          }
+          ctx.fillStyle = "rgba(220,252,231,0.98)";
+          ctx.fillText(poisonLabel, px, badgeY + 0.5);
+          ctx.restore();
         }
 
         if(e===this.selectedEnemy){
@@ -3164,13 +3852,44 @@ class Game {
         const pulse = 1 + Math.sin((tNow - e.birthT)*walkFreq) * walkAmp;
         const radius = this.tileSize * 0.23 * hpScale * bossScale * pulse;
         const hpPct = clamp(e.hp / e.maxHP, 0, 1);
-        ctx.fillStyle="rgba(34,197,94,0.78)";
-        ctx.fillRect(px-radius, py-radius-10, (radius*2)*hpPct, 4);
-        ctx.fillStyle="rgba(255,255,255,0.12)";
-        ctx.fillRect(px-radius+(radius*2)*hpPct, py-radius-10, (radius*2)*(1-hpPct), 4);
-        ctx.strokeStyle="rgba(15,23,42,0.90)";
-        ctx.lineWidth=1;
-        ctx.strokeRect(px-radius, py-radius-10, radius*2, 4);
+        const barH = e.isBoss ? Math.max(6, this.tileSize * 0.10) : Math.max(4, this.tileSize * 0.055);
+        const barY = py - radius - Math.max(9, this.tileSize * 0.16);
+        const hpColor = e.isBoss
+          ? "rgba(250,204,21,0.96)"
+          : (hpPct <= 0.25
+            ? "rgba(248,113,113,0.94)"
+            : (hpPct <= 0.55 ? "rgba(251,191,36,0.92)" : "rgba(74,222,128,0.90)"));
+        ctx.save();
+        if (e.isBoss || hpPct <= 0.25) {
+          ctx.shadowBlur = Math.max(4, barH * 1.8);
+          ctx.shadowColor = hpColor;
+        }
+        ctx.fillStyle = "rgba(2,6,23,0.76)";
+        ctx.fillRect(px-radius, barY, radius*2, barH);
+        ctx.fillStyle = hpColor;
+        ctx.fillRect(px-radius, barY, (radius*2)*hpPct, barH);
+        ctx.restore();
+        ctx.strokeStyle = e.isBoss ? "rgba(254,240,138,0.92)" : "rgba(15,23,42,0.90)";
+        ctx.lineWidth = e.isBoss ? 1.4 : 1;
+        ctx.strokeRect(px-radius, barY, radius*2, barH);
+        if (e.isBoss) {
+          const label = `BOSS • ${Math.ceil(hpPct * 100)}%`;
+          ctx.font = `800 ${Math.max(9, Math.floor(this.tileSize * 0.14))}px system-ui`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "bottom";
+          ctx.fillStyle = "rgba(255,248,178,0.98)";
+          ctx.fillText(label, px, barY - 3);
+          const phase = e.firstBossPhase;
+          if (phase) {
+            const phaseLabel = phase.bonusPct ? `EXPOSED +${phase.bonusPct}%` : phase.label;
+            ctx.fillStyle = "rgba(2,6,23,0.92)";
+            const width = ctx.measureText(phaseLabel).width + 10;
+            ctx.fillRect(px - width / 2, py + radius + 3, width, 16);
+            ctx.textBaseline = "middle";
+            ctx.fillStyle = phase.bonusPct ? "#86efac" : "#fde68a";
+            ctx.fillText(phaseLabel, px, py + radius + 11);
+          }
+        }
       }
 
       const brightenRgba = (rgba, mix=0.42, alpha=0.98) => {
@@ -3319,23 +4038,35 @@ class Game {
         const a = f.alpha();
         const px=this.offsetX + f.x*this.tileSize;
         const py=this.offsetY + f.y*this.tileSize;
+        const elapsed = 1 - a;
+        const enter = 1 - Math.pow(1 - clamp(elapsed * 5.4, 0, 1), 3);
+        const scale = (f.isCrit ? 0.78 : 0.88) + enter * (f.isCrit ? 0.46 : 0.20);
 
         ctx.save();
         ctx.globalAlpha = a;
+        ctx.translate(px, py);
+        ctx.scale(scale, scale);
 
-        const drawSize = f.isCrit ? Math.round(f.size * 1.35) : f.size;
-        ctx.font = `bold ${drawSize}px system-ui`;
+        const drawSize = f.isCrit ? Math.round(f.size * 1.30) : f.size;
+        ctx.font = `800 ${drawSize}px system-ui`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
 
-        // hafif outline
-        ctx.lineWidth = f.isCrit ? 6 : 4;
-        ctx.strokeStyle = "rgba(0,0,0,0.55)";
-        ctx.strokeText(f.text, px, py);
-
         const floaterColor = f.color || (f.isCrit ? "rgba(250,204,21,0.95)" : "rgba(232,238,252,0.92)");
+        if (f.isCrit && !reducedEffects) {
+          ctx.shadowBlur = Math.max(7, drawSize * 0.72);
+          ctx.shadowColor = floaterColor;
+        }
+        ctx.lineWidth = f.isCrit ? 5.4 : 3.6;
+        ctx.strokeStyle = f.isCrit ? "rgba(69,26,3,0.86)" : "rgba(2,6,23,0.72)";
+        ctx.strokeText(f.text, 0, 0);
+        if (f.isCrit) {
+          ctx.lineWidth = 1.15;
+          ctx.strokeStyle = "rgba(255,248,178,0.96)";
+          ctx.strokeText(f.text, 0, 0);
+        }
         ctx.fillStyle = floaterColor;
-        ctx.fillText(f.text, px, py);
+        ctx.fillText(f.text, 0, 0);
         ctx.restore();
       }
 
@@ -3453,6 +4184,106 @@ class Game {
       this.offsetY = baseOffsetY;
     }
 
+    getSelectedPanelObjectId(value){
+      if (!value || typeof value !== "object") return "none";
+      if (!this._selectedPanelObjectIds) this._selectedPanelObjectIds = new WeakMap();
+      if (!this._selectedPanelObjectNextId) this._selectedPanelObjectNextId = 1;
+      let id = this._selectedPanelObjectIds.get(value);
+      if (!id) {
+        id = this._selectedPanelObjectNextId++;
+        this._selectedPanelObjectIds.set(value, id);
+      }
+      return id;
+    }
+
+    getSelectedPanelSignature(inspectMode=false){
+      const compact = (value, scale=10) => {
+        const number = Number(value);
+        return Number.isFinite(number) ? Math.round(number * scale) : 0;
+      };
+      const modal = isModalOpen() ? 1 : 0;
+      const enemy = this.selectedEnemy;
+      const tower = this.selectedTowerInstance;
+      const def = this.selectedTowerDef;
+      const enemyState = enemy ? [
+        this.getSelectedPanelObjectId(enemy),
+        enemy.typeId,
+        enemy.isBoss ? 1 : 0,
+        compact(enemy.hp), compact(enemy.maxHP), compact(enemy.armor),
+        compact(enemy.armorShredFlat), compact(enemy.baseSpeed),
+        compact(enemy.slowPct), compact(enemy.slowTime), compact(enemy.rootTime),
+        Math.round(Number(enemy.poisonStacks) || 0), compact(enemy.wealth),
+        compact(enemy.incomingEstimate), enemy.lastBossSkill || "",
+        enemy.firstBossStatus,
+        listEnemyModifiers(enemy).map((modifier) => `${modifier.id || modifier.name || ""}:${modifier.desc || ""}`).join(";"),
+        enemy.bossSkills
+          ? Object.values(enemy.bossSkills).map((skill) => [
+              skill.id || "", skill.active ? 1 : 0, compact(skill.timer), compact(skill.cd)
+            ].join(",")).join(";")
+          : ""
+      ].join("|") : "none";
+      const towerState = tower ? [
+        this.getSelectedPanelObjectId(tower), tower.def?.id || "",
+        tower.level, tower.secondaryLevel || 0,
+        tower.archerSpecialization, tower.focusStacks,
+        tower.targetMode || "", Math.round(Number(tower.spentGold) || 0),
+        Math.round(Number(tower.damageDealt) || 0), Math.round(Number(tower.kills) || 0),
+        compact(tower.AD?.[0]), compact(tower.AD?.[1]), compact(tower.baseAS),
+        compact(tower.baseRange), compact(tower.critChance), compact(tower.critDmg),
+        compact(tower.magicBonus), compact(tower.magicBonusExact), compact(tower.mana),
+        compact(tower.maxMana), compact(tower.manaRegen), compact(tower.manaOnHit),
+        compact(tower.prestigeMana), compact(tower.prestigeMaxMana), compact(tower.prestigeActive),
+        compact(tower.tempASMul), compact(tower.uplinkTotalCore), compact(tower.uplinkTotalGold),
+        compact(tower.prestigeGoldTotal),
+        Object.entries(tower.peelBuffs || {}).map(([key, buff]) => `${key}:${compact(buff?.mul)}:${compact(buff?.time)}`).join(";"),
+        (tower.specialUpgrades || []).map((upgrade) => [
+          upgrade.tier, upgrade.rarityId || "", boundedText(upgrade.title, "", MAX_SAVE_TEXT)
+        ].join(",")).join(";"),
+        Object.values(tower.perks || {}).map((value) => compact(value, 1000)).join(",")
+      ].join("|") : "none";
+      const totalDamage = this.towers.reduce((sum, item) => sum + (Number(item?.damageDealt) || 0), 0);
+      const hoverChoice = this.hoverSpecialChoice;
+      return [
+        this.gameOver ? 1 : 0,
+        inspectMode ? 1 : 0,
+        Math.round(Number(this.totalKills) || 0),
+        (this.highKills || []).join(","),
+        Math.round(Number(this.gold) || 0),
+        Math.round(Number(this.currentWave) || 0),
+        modal,
+        this.winModalOpen ? 1 : 0,
+        this.uiHover?.upgrade ? 1 : 0,
+        this.uiHover?.fast ? 1 : 0,
+        hoverChoice ? `${this.getSelectedPanelObjectId(hoverChoice)}:${hoverChoice.tier || 0}:${boundedText(hoverChoice.title, "", MAX_SAVE_TEXT)}` : "none",
+        def?.id || "none",
+        enemyState,
+        towerState,
+        Math.round(totalDamage)
+      ].join("||");
+    }
+
+    refreshWaveForecast(finalWave){
+      const { waveForecastTitle, waveForecastOrder } = this.uiAdapter.refs;
+      if (!waveForecastTitle || !waveForecastOrder) return;
+      const wave = Math.min(this.nextWaveNum, MAX_SAVE_WAVE);
+      const key = [wave, this.mapIndex, this.isCustomMapRun, this.endlessMode, this.gameOver, finalWave].join("|");
+      if (this._waveForecastKey === key) return;
+      this._waveForecastKey = key;
+      waveForecastOrder.hidden = this.gameOver || finalWave;
+      if (waveForecastOrder.hidden) {
+        waveForecastTitle.textContent = this.gameOver ? "Wave" : "Final campaign wave";
+        waveForecastOrder.textContent = "";
+        return;
+      }
+      const parts = wavePlan(wave, this.wavePlanOptions());
+      const { resistType } = waveModifiers(wave);
+      const resistance = resistType === "armor" ? " · Armor" : resistType === "mr" ? " · Magic resist" : "";
+      waveForecastTitle.textContent = `Incoming · Wave ${wave}${resistance}`;
+      waveForecastOrder.textContent = parts.map(({ type, count }) =>
+        `${count} × ${CONTENT_REGISTRY.enemies.get(type)?.name ?? type}`
+      ).join(" → ");
+    }
+
     refreshUI(force=false){
       if (!force) {
         this._uiDirty = true;
@@ -3467,8 +4298,11 @@ class Game {
       if (this.hudWaveEl) this.hudWaveEl.textContent=this.currentWave;
 
       let alive = 0;
+      let firstBoss = null;
       for (const e of this.enemies) {
-        if (!e.dead && !e.reachedExit) alive += 1;
+        if (e.dead || e.reachedExit) continue;
+        alive += 1;
+        if (e.isBoss && e.wave === FIRST_BOSS_WAVE) firstBoss = e;
       }
       let remaining = 0;
       for (const w of this.wavesActive) {
@@ -3484,6 +4318,20 @@ class Game {
 
       const startBtn=this.startWaveBtnEl;
       const nextBtn=this.nextWaveNowBtnEl;
+      const finalWave = this.atCampaignFinalWave();
+      this.refreshWaveForecast(finalWave);
+      const intel = this.uiAdapter.refs.waveBossIntel;
+      if (intel) {
+        let message = "";
+        if (!this.gameOver && !this.winModalOpen) {
+          if (firstBoss) message = `Wave ${FIRST_BOSS_WAVE} boss · ${firstBoss.firstBossStatus}`;
+          else if (this.nextWaveNum === FIRST_BOSS_WAVE) message = FIRST_BOSS_BRIEFING;
+        }
+        if (intel.textContent !== message) {
+          intel.textContent = message;
+          intel.hidden = !message;
+        }
+      }
       if (startBtn) {
         startBtn.disabled = this.started || this.gameOver || this.winModalOpen;
         startBtn.style.display = this.started ? "none" : "";
@@ -3496,7 +4344,7 @@ class Game {
           nextBtn.style.setProperty("--next-wave-glow", "0");
           nextBtn.innerHTML = "<span>Restart</span>";
         } else {
-          nextBtn.disabled = (!this.started) || this.winModalOpen;
+          nextBtn.disabled = (!this.started) || this.winModalOpen || finalWave;
           nextBtn.classList.toggle("expanded", !!this.started);
           const buff = this.nextWaveNowGoldBuff || { mult: 1, timeLeft: 0, maxTime: 0 };
           const active = buff.timeLeft > 0 && buff.mult > 1;
@@ -3511,27 +4359,20 @@ class Game {
         }
       }
 
-      if (this.cheatFormulaDebugEl) {
-        const selected = this.selectedTowerInstance || null;
-        const sniperTower = (selected?.def?.id === "sniper")
-          ? selected
-          : (this.towers.find(t => t.def?.id === "sniper") || null);
-        const poisonTower = (selected?.def?.id === "poison")
-          ? selected
-          : (this.towers.find(t => t.def?.id === "poison") || null);
-        const fallback = { magicBonusExact: 0, magicBonus: 0, perks: { magMul: 1 }, peelBuffs: { mag: { mul: 1 } } };
-        const overPct = sniperOverlevelPct(sniperTower || fallback);
-        const poisonMul = poisonSkillMultiplier(poisonTower || fallback);
-        const carepackageMul = Math.max(24, CFG.SNIPER_CAREPACKAGE_PRESTIGE_MULT || 24);
-        this.cheatFormulaDebugEl.textContent = `Overlevel +${overPct.toFixed(2)}% • Poison x${poisonMul.toFixed(2)} • Carepackage x${carepackageMul}`;
-      }
-
       const info=this.selectedInfoHudEl;
       const upBtn=this.upgradeBtnHudEl;
       const fastBtn=this.fastUpgradeBtnHudEl;
       const sellBtn=this.sellBtnHudEl;
       if (!info || !upBtn || !sellBtn) return;
       const inspectMode = this.gameOver && this.gameOverInspectMode;
+      const panelSignature = this.getSelectedPanelSignature(inspectMode);
+      if (panelSignature === this._selectedPanelSignature) return;
+      this._selectedPanelSignature = panelSignature;
+      const pathPicker = this.uiAdapter.refs.archerPathPicker;
+      if (pathPicker) {
+        pathPicker.hidden = !this.selectedTowerInstance?.canChooseArcherPath() || this.gameOver ||
+          this.winModalOpen || isModalOpen() || !!this.selectedEnemy;
+      }
       const calcFastUpgradeCost = (t) => {
         if (!t) return null;
         const target = Math.min(CFG.TOWER_MAX_LEVEL, (Math.floor(t.level / 5) + 1) * 5);
@@ -3557,8 +4398,12 @@ class Game {
           level: t.level,
           AD: [t.AD[0], t.AD[1]],
           baseAS: t.baseAS,
+          baseRange: t.baseRange,
+          critChance: t.critChance,
+          critDmg: t.critDmg,
           magicBonus: t.magicBonus,
           magicBonusExact: Number(t.magicBonusExact ?? t.magicBonus ?? 0),
+          manaRegen: t.manaRegen,
           manaOnHit: t.manaOnHit,
           perks: {
             adMul: t.perks.adMul,
@@ -3587,6 +4432,8 @@ class Game {
             Math.round(sim.AD[1] * adGainMul)
           ];
           sim.baseAS *= (1 + g * 0.22);
+          sim.baseRange += (0.10 + g * 0.10);
+          sim.critChance = clamp(sim.critChance + g * 0.010, 0, 0.45);
           const magicMult = (sim.def.id === "mage")
             ? (1 + g * 0.42)
             : (sim.def.id === "breaker")
@@ -3596,7 +4443,10 @@ class Game {
               : (1 + g * 0.30);
           sim.magicBonusExact = Math.max(0, sim.magicBonusExact * magicMult);
           sim.magicBonus = Math.max(0, Math.round(sim.magicBonusExact));
-          if (sim.def.id !== "sniper") sim.manaOnHit *= (1 + g * 0.12);
+          if (sim.def.id !== "sniper") {
+            sim.manaRegen *= (1 + g * 0.16);
+            sim.manaOnHit *= (1 + g * 0.12);
+          }
           sim.level = (lvlBefore === CFG.TOWER_MAX_LEVEL) ? CFG.PRESTIGE_LEVEL : (lvlBefore + 1);
         }
 
@@ -3611,12 +4461,31 @@ class Game {
         const adLow = Math.round(sim.AD[0] * sim.perks.adMul * sim.perks.dmgMul * peelAd);
         const adHigh = Math.round(sim.AD[1] * sim.perks.adMul * sim.perks.dmgMul * peelAd);
         const as = Math.max(0.05, sim.baseAS * sim.perks.asMul * sim.tempASMul * peelAs);
+        const peelRange = t.peelMul("rng");
+        const range = Math.max(1, 1 + (Math.max(1, sim.baseRange) - 1) * peelRange);
+        const critChance = clamp(sim.critChance, 0, 1);
+        const critMult = Math.max(1, Number(sim.critDmg) || 1);
         const magic = Math.round(sim.magicBonus * sim.perks.magMul * sim.perks.dmgMul * peelMag);
+        const manaRegen = Math.max(0, Number(sim.manaRegen) || 0);
         const bounce = sim.def.id === "peel" ? peelBounceCountFromAD(sim.AD, sim.perks.adMul * peelAd) : 0;
         const skillText = (sim.def.skillDesc ? sim.def.skillDesc(sim) : "—");
         const peelPower = (sim.def.id === "peel") ? Math.round(peelBuffPower(sim) * 100) : 0;
 
-        return { level: sim.level, adLow, adHigh, as, magic, manaHit: sim.manaOnHit, bounce, skillText, peelPower };
+        return {
+          level: sim.level,
+          adLow,
+          adHigh,
+          as,
+          range,
+          critChance,
+          critMult,
+          magic,
+          manaRegen,
+          manaHit: sim.manaOnHit,
+          bounce,
+          skillText,
+          peelPower
+        };
       };
       const resetFastBtn = () => {
         if (!fastBtn) return;
@@ -3675,7 +4544,9 @@ class Game {
         const bossLastLine = (e.isBoss && e.lastBossSkill)
           ? `<div class="selRow"><div class="k">Last Skill</div><div class="v">${e.lastBossSkill}</div></div>`
           : "";
-        const skillStatusLine = (e.isBoss)
+        const skillStatusLine = e.firstBossPhase
+          ? `<div class="selRow"><div class="k">Boss cycle</div><div class="v">${e.firstBossStatus}</div></div>`
+          : (e.isBoss)
           ? (() => {
               const debuffed = (e.poisonStacks > 0) || (e.slowPct > 0.2) || (e.frostbiteTime > 0) || (e.frostbiteDotTime > 0);
               const cleanse = debuffed ? "ready" : "needs debuff";
@@ -3687,7 +4558,8 @@ class Game {
         const modifierDescLine = modifier
           ? `<div class="selHint"><b>Modifier</b>: ${modifier.desc}</div>`
           : "";
-        const bossDescLine = (e.isBoss) ? `<div class="selHint"><b>Boss Skills</b>: Cleanse (removes debuffs), Heal (recovers HP), Summon (spawns minions).</div>` : "";
+        const bossDescLine = e.firstBossPhase ? `<div class="selHint">${FIRST_BOSS_BRIEFING}</div>`
+          : (e.isBoss) ? `<div class="selHint"><b>Boss Skills</b>: Cleanse (removes debuffs), Heal (recovers HP), Summon (spawns minions).</div>` : "";
         const armorState = (e.armor <= 0.01)
           ? "X: BROKEN"
           : `X:${Math.round(e.armorShredFlat)}`;
@@ -3743,7 +4615,10 @@ class Game {
           ? (t.def.autoAttackDesc(t) || "—")
           : (t.def.autoAttackDesc || "—");
         const skillText = baseSkillTextRaw.replaceAll("\n","<br/>");
-        const prestigeText = t.def.prestige ? `${t.def.prestige.name}: ${t.def.prestige.desc}` : "—";
+        const prestigeDesc = typeof t.def.prestige?.desc === "function"
+          ? t.def.prestige.desc(t)
+          : t.def.prestige?.desc;
+        const prestigeText = t.def.prestige ? `${t.def.prestige.name}: ${prestigeDesc || "—"}` : "—";
         const hideMageCombatDetail = (t.def.id === "mage" && t.level >= CFG.PRESTIGE_LEVEL);
 
         const primaryManaLine = (t.maxMana>0)
@@ -3753,7 +4628,8 @@ class Game {
         const prestigeManaLine = (t.level>=CFG.PRESTIGE_LEVEL && t.prestigeMaxMana>0)
           ? `${t.prestigeMana.toFixed(0)}/${t.prestigeMaxMana} (${(t.prestigeActive>0? `ACTIVE ${t.prestigeActive.toFixed(1)}s` : "ready in ~"+Math.max(0, (t.prestigeMaxMana - t.prestigeMana)/(t.prestigeMaxMana/CFG.PRESTIGE_RECHARGE_TIME_SEC)).toFixed(0)+"s")})`
           : "";
-        const damageSummary = `${formatCompact(t.damageDealt)} / ${t.kills} (${dmgPct.toFixed(1)}%)`;
+        const towerOverkill = this.runStats?.towerOverkill?.[t.def.id] || 0;
+        const damageSummary = `${formatCompact(t.damageDealt)} real / ${formatCompact(towerOverkill)} overkill / ${t.kills} kills (${dmgPct.toFixed(1)}%)`;
         const peelUplinkTotalsLine = isPeel
           ? `<div class="selRow"><div class="k">Uplink HP / Gold</div><div class="v">+${formatCompact(t.uplinkTotalCore || 0)} HP / +${formatCompact(t.uplinkTotalGold || 0)}g</div></div>`
           : ``;
@@ -3762,15 +4638,17 @@ class Game {
           : ``;
 
         let specialSummary = "";
+        let specialUpgradeTitles = [];
         if (t.specialUpgrades && t.specialUpgrades.length) {
           const sorted = [...t.specialUpgrades].sort((a,b)=>a.tier-b.tier);
+          specialUpgradeTitles = sorted.map(u => boundedText(u?.title, "", MAX_SAVE_TEXT));
           specialSummary = `
             <div class="selUpgrades">
               <div class="selUpgradesTitle">Special Upgrades</div>
-              ${sorted.map(u => `
+              ${sorted.map((u, idx) => `
                 <div class="selUpgradeItem rarity-${u.rarityId || "common"}">
                   <div class="selUpgradeTier">Tier ${u.tier}</div>
-                  <div class="selUpgradeText">${u.title}</div>
+                  <div class="selUpgradeText" data-special-upgrade-index="${idx}"></div>
                 </div>
               `).join("")}
             </div>
@@ -3814,8 +4692,33 @@ class Game {
         const asPreview = (previewView && baseView && Math.abs(previewView.as - baseView.as) > 0.0001)
           ? `<span class="selPlus"> (+${(previewView.as - baseView.as).toFixed(2)})</span>`
           : "";
+        const rangePreview = (previewView && baseView && Math.abs(previewView.range - baseView.range) > 0.0001)
+          ? `<span class="selPlus"> (+${(previewView.range - baseView.range).toFixed(2)})</span>`
+          : "";
+        const critChanceDiffPct = (previewView && baseView)
+          ? ((previewView.critChance - baseView.critChance) * 100)
+          : 0;
+        const critMultDiff = (previewView && baseView)
+          ? (previewView.critMult - baseView.critMult)
+          : 0;
+        const critPreview = (() => {
+          if (!previewView || !baseView) return "";
+          const parts = [];
+          if (Math.abs(critChanceDiffPct) > 0.0001) {
+            const sign = critChanceDiffPct >= 0 ? "+" : "";
+            parts.push(`${sign}${critChanceDiffPct.toFixed(1)}%`);
+          }
+          if (Math.abs(critMultDiff) > 0.0001) {
+            const sign = critMultDiff >= 0 ? "+" : "";
+            parts.push(`${sign}x${critMultDiff.toFixed(2)}`);
+          }
+          return parts.length ? `<span class="selPlus"> (${parts.join(" / ")})</span>` : "";
+        })();
         const magicPreview = (previewView && baseView && (previewView.magic - baseView.magic) !== 0)
           ? `<span class="selPlus"> (+${previewView.magic - baseView.magic})</span>`
+          : "";
+        const manaRegenPreview = (previewView && baseView && Math.abs(previewView.manaRegen - baseView.manaRegen) > 0.0001)
+          ? `<span class="selPlus"> (+${(previewView.manaRegen - baseView.manaRegen).toFixed(2)})</span>`
           : "";
         const manaHitPreview = (previewView && baseView && Math.abs(previewView.manaHit - baseView.manaHit) > 0.0001)
           ? `<span class="selPlus"> (+${(previewView.manaHit - baseView.manaHit).toFixed(2)})</span>`
@@ -3824,11 +4727,11 @@ class Game {
           ? `${baseView?.bounce ?? t.getBounceCount()}${bouncePreview}`
           : `${formatCompact(baseView?.adLow ?? 0)}-${formatCompact(baseView?.adHigh ?? 0)}${adPreview}`;
         const asValue = `${(baseView?.as ?? t.AS).toFixed(2)}${asPreview}`;
-        const rangeValue = `${t.range.toFixed(2)}`;
-        const critChancePct = (Number(t.critChance) || 0) * 100;
-        const critMult = Number(t.critDmg) || 1;
-        const critValue = `${critChancePct.toFixed(1)}% / x${critMult.toFixed(2)}`;
-        const manaRegenValue = `${t.manaRegen.toFixed(2)}/s`;
+        const rangeValue = `${(baseView?.range ?? t.range).toFixed(2)}${rangePreview}`;
+        const critChancePct = (Number(baseView?.critChance ?? t.critChance) || 0) * 100;
+        const critMult = Number(baseView?.critMult ?? t.critDmg) || 1;
+        const critValue = `${critChancePct.toFixed(1)}% / x${critMult.toFixed(2)}${critPreview}`;
+        const manaRegenValue = `${(baseView?.manaRegen ?? t.manaRegen).toFixed(2)}/s${manaRegenPreview}`;
         const magicValue = `${baseView?.magic ?? Math.round(t.magicBonus * t.perks.magMul * t.perks.dmgMul * t.peelMul("mag"))}${magicPreview}`;
         const manaHitValue = `${(baseView?.manaHit ?? t.manaOnHit).toFixed(2)}${manaHitPreview}`;
         const peelPowerPreview = (isPeel && previewView && baseView && (previewView.peelPower - baseView.peelPower) !== 0)
@@ -3839,14 +4742,17 @@ class Game {
           : ``;
         const magePrestigeBuffLine = (t.def.id === "mage" && t.level >= CFG.PRESTIGE_LEVEL)
           ? (() => {
-              const magic = Math.max(0, (t.magicBonus || 0) * (t.perks?.magMul ?? 1) * t.peelMul("mag"));
-              const auraMul = magePrestigeAuraMulFromMagic(magic);
-              const auraRange = t.range + magePrestigeAuraRangeBonusFromMagic(magic);
+              const aura = magePrestigeAuraProfile();
+              const auraMul = aura.manaMultiplier;
+              const auraRange = t.range + aura.rangeBonus;
               return `<div class="selHint"><b>Mage Prestige Buff</b>: Mana x${auraMul.toFixed(2)} in ${auraRange.toFixed(2)} range.</div>`;
             })()
           : ``;
         const magePrestigeCantAttackLine = (t.def.id === "mage" && t.level >= CFG.PRESTIGE_LEVEL)
           ? `<div class="selHint"><b>Mage</b>: Can't attack due to prestige reasons. Arcane union rules.</div>`
+          : ``;
+        const magePrestigePreviewLine = (t.def.id === "mage" && t.level === CFG.TOWER_MAX_LEVEL)
+          ? `<div class="selHint"><b>Next upgrade — Mage Prestige</b>: this permanently stops Mage auto-attacks and unlocks its Mana aura. Choose it only when the support role fits your defense.</div>`
           : ``;
         const buildSkillInlinePreview = (towerId, baseRaw, previewRaw) => {
           if (!previewRaw || previewRaw === baseRaw) return "";
@@ -3955,17 +4861,27 @@ class Game {
           ${sniperPrestigeGoldLine}
           ${t.level>=CFG.PRESTIGE_LEVEL ? `<div class="selRow"><div class="k">Prestige Mana</div><div class="v">${prestigeManaLine}</div></div>` : ``}
           ${peelBuffLine}
+          ${t.archerSpecialization === "focus" ? `<div class="selRow"><div class="k">Next shot damage on same enemy</div><div class="v">+${focusBonusPercent(t, t.focusTarget)}%</div></div>` : ""}
 
           ${hideMageCombatDetail ? `` : `<div class="selHint"><b>Auto Attack</b>: ${autoAttackText}</div>`}
           ${hideMageCombatDetail ? `` : `<div class="selHint"><b>${t.def.skillName}</b>: ${skillTextWithPreview}<span class="skillPreviewSlot">${skillPreviewSlot}</span></div>`}
+          ${magePrestigePreviewLine}
           ${t.level>=CFG.PRESTIGE_LEVEL ? `<div class="selHint"><b>Prestige</b>: ${prestigeText}</div>` : ``}
           ${magePrestigeCantAttackLine}
           ${magePrestigeBuffLine}
           ${specialSummary}
         `;
+        if (specialUpgradeTitles.length) {
+          info.querySelectorAll("[data-special-upgrade-index]").forEach((node) => {
+            const idx = Math.floor(Number(node.getAttribute("data-special-upgrade-index")) || 0);
+            node.textContent = specialUpgradeTitles[idx] || "";
+          });
+        }
 
         upBtn.disabled = (!canUp) || (this.gold < cost) || isModalOpen();
-        upBtn.textContent = canUp ? `Upgrade (Z) ${cost}` : "MAX";
+        upBtn.textContent = canUp
+          ? `${t.def.id === "mage" && t.level === CFG.TOWER_MAX_LEVEL ? "Prestige (Z)" : "Upgrade (Z)"} ${cost}`
+          : "MAX";
         upBtn.title = "";
         if (fastBtn) {
           const canFast = !!fastCost && this.gold >= fastCost && !isModalOpen() && !inspectMode;
@@ -4031,22 +4947,56 @@ class Game {
     }
     loop(){
       const t=now();
-      const dt=clamp(t-this.lastT,0,0.05);
+      const elapsed=Math.max(0, t-this.lastT);
       this.lastT=t;
+      const dt=Math.min(elapsed, MAX_FRAME_DELTA_SEC);
       const perfEnabled = !!window.__armtdPerf;
       const perfHud = this.uiAdapter?.refs?.perfHud || null;
-      if (perfHud) perfHud.style.display = perfEnabled ? "block" : "none";
+      if (perfHud) perfHud.style.display = "block";
       const perfFrameStart = perfEnabled ? performance.now() : 0;
       let perfStart = 0;
 
-      this.resizeCanvasToDisplaySize();
+      const fpsAcc = this._fpsAcc || (this._fpsAcc = { sec: 0, frames: 0, label: "--" });
+      fpsAcc.sec += elapsed;
+      fpsAcc.frames += 1;
+      if (fpsAcc.sec >= 0.5) {
+        const fps = fpsAcc.frames / Math.max(0.001, fpsAcc.sec);
+        fpsAcc.label = Number.isFinite(fps) ? fps.toFixed(0) : "--";
+        fpsAcc.sec = 0;
+        fpsAcc.frames = 0;
+      }
+      if (perfHud && !perfEnabled) {
+        perfHud.textContent = `FPS: ${fpsAcc.label}`;
+      }
 
+      const currentMapKey = `${this.map?.w || 0}x${this.map?.h || 0}`;
+      if (this._resizeDirty || this._resizeMapKey !== currentMapKey) {
+        this.resizeCanvasToDisplaySize();
+      }
+
+      const menuOpen = typeof this.menuVisibility === "function" && this.menuVisibility();
       if (perfEnabled) perfStart = performance.now();
-      this.update(dt);
+      let simulationSteps = 0;
+      if (!menuOpen) {
+        this._simulationAccumulator = Math.min(
+          (Number(this._simulationAccumulator) || 0) + dt,
+          SIMULATION_STEP_SEC * MAX_SIMULATION_STEPS_PER_FRAME
+        );
+        while (this._simulationAccumulator + 1e-9 >= SIMULATION_STEP_SEC
+          && simulationSteps < MAX_SIMULATION_STEPS_PER_FRAME) {
+          this.update(SIMULATION_STEP_SEC);
+          this._simulationAccumulator -= SIMULATION_STEP_SEC;
+          simulationSteps += 1;
+        }
+      } else {
+        // The menu overlays the battlefield; pausing simulation here avoids
+        // running enemy/tower work while the player is browsing the menu.
+        this._simulationAccumulator = 0;
+      }
       if (perfEnabled) this._perfAcc.updateMs += (performance.now() - perfStart);
 
       if (perfEnabled) perfStart = performance.now();
-      this.draw();
+      if (!menuOpen) this.draw();
       if (perfEnabled) this._perfAcc.drawMs += (performance.now() - perfStart);
 
       this._uiRefreshTimer += dt;
@@ -4058,19 +5008,31 @@ class Game {
 
       if (perfEnabled) {
         const acc = this._perfAcc;
-        acc.sec += dt;
+        acc.sec += elapsed;
         acc.frames += 1;
-        acc.frameMs += (performance.now() - perfFrameStart);
+        const framePacingMs = elapsed * 1000;
+        const jsFrameCostMs = performance.now() - perfFrameStart;
+        acc.framePacingMs += framePacingMs;
+        acc.framePacingSamples.push(framePacingMs);
+        acc.jsFrameMs += jsFrameCostMs;
         if (acc.sec >= 1.0) {
           const inv = 1 / Math.max(1, acc.frames);
-          const summary = `fps:${(acc.frames / acc.sec).toFixed(1)} frame:${(acc.frameMs * inv).toFixed(2)}ms update:${(acc.updateMs * inv).toFixed(2)}ms draw:${(acc.drawMs * inv).toFixed(2)}ms ui:${(acc.uiMs * inv).toFixed(2)}ms`;
+          const sortedFrames = [...acc.framePacingSamples].sort((a, b) => a - b);
+          const percentile = (ratio) => {
+            if (!sortedFrames.length) return 0;
+            const index = Math.min(sortedFrames.length - 1, Math.max(0, Math.ceil(sortedFrames.length * ratio) - 1));
+            return sortedFrames[index];
+          };
+          const summary = `fps:${(acc.frames / acc.sec).toFixed(1)} frame:${(acc.framePacingMs * inv).toFixed(2)}ms p95:${percentile(0.95).toFixed(2)}ms p99:${percentile(0.99).toFixed(2)}ms js:${(acc.jsFrameMs * inv).toFixed(2)}ms update:${(acc.updateMs * inv).toFixed(2)}ms draw:${(acc.drawMs * inv).toFixed(2)}ms ui:${(acc.uiMs * inv).toFixed(2)}ms`;
           console.debug(
             `[PERF] ${summary}`
           );
           if (perfHud) perfHud.textContent = summary;
           acc.sec = 0;
           acc.frames = 0;
-          acc.frameMs = 0;
+          acc.framePacingMs = 0;
+          acc.framePacingSamples.length = 0;
+          acc.jsFrameMs = 0;
           acc.updateMs = 0;
           acc.drawMs = 0;
           acc.uiMs = 0;
@@ -4079,7 +5041,9 @@ class Game {
         if (perfHud) perfHud.textContent = "";
         this._perfAcc.sec = 0;
         this._perfAcc.frames = 0;
-        this._perfAcc.frameMs = 0;
+        this._perfAcc.framePacingMs = 0;
+        this._perfAcc.framePacingSamples.length = 0;
+        this._perfAcc.jsFrameMs = 0;
         this._perfAcc.updateMs = 0;
         this._perfAcc.drawMs = 0;
         this._perfAcc.uiMs = 0;
@@ -4093,4 +5057,11 @@ class Game {
   // Modal logic
   // =========================================================
   
-export { Game, GAME_VERSION, RUN_SAVE_SCHEMA };
+export {
+  Game,
+  GAME_VERSION,
+  RUN_SAVE_SCHEMA,
+  escapeHtmlText,
+  normalizeMapDef,
+  normalizeSpecialUpgrades
+};

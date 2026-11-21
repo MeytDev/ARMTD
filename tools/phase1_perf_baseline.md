@@ -21,11 +21,16 @@ Collect comparable runtime metrics before/after performance changes using built-
 ## Metrics
 - `fps`
 - `frame ms`
+- `p95 ms` and `p99 ms` (one-second frame-time percentiles)
 - `update ms`
 - `draw ms`
 - `ui ms`
 
+The sampler prints the p95/p99 values alongside the averages. Keep the same
+scenario for each build and record the percentile columns; do not infer a
+device-wide baseline from the synthetic audit cases.
+
 ## Baseline Table
-| Date | Build | Scenario | fps | frame ms | update ms | draw ms | ui ms | Notes |
-|---|---|---|---:|---:|---:|---:|---:|---|
-| 2026-02-20 | v0.2.58 | Fill this row |  |  |  |  |  |  |
+| Date | Build | Scenario | fps | frame ms | p95 ms | p99 ms | update ms | draw ms | ui ms | Notes |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|
+| — | — | Not measured yet |  |  |  |  |  |  |  | Run on a named reference device before claiming a baseline. |

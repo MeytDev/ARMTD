@@ -1,6 +1,7 @@
 const GAME_UI_IDS = {
   logLines: "logLines",
-  hudLogTitle: "hudLogTitle",
+  hudLogTitle: "hudLogTitleText",
+  hudLogRarityLv: "hudLogRarityLv",
   modifierIntroBack: "modifierIntroBack",
   modifierIntroTitle: "modifierIntroTitle",
   modifierIntroText: "modifierIntroText",
@@ -20,16 +21,20 @@ const GAME_UI_IDS = {
   hudWave: "hud_wave",
   hudMobs: "hud_mobs",
   mapName: "mapName",
+  mapWipBanner: "mapWipBanner",
   startWaveBtn: "startWaveBtn",
+  waveForecastTitle: "waveForecastTitle",
+  waveForecastOrder: "waveForecastOrder",
+  waveBossIntel: "waveBossIntel",
   nextWaveNowBtn: "nextWaveNowBtn",
   selectedInfoHud: "selectedInfoHud",
+  archerPathPicker: "archerPathPicker",
   upgradeBtnHud: "upgradeBtnHud",
   fastUpgradeBtnHud: "fastUpgradeBtnHud",
   sellBtnHud: "sellBtnHud",
   speedSlider: "speedSlider",
   speedLabel: "speedLabel",
   cheatPanel: "cheatPanel",
-  cheatFormulaDebug: "cheatFormulaDebug",
   perfHud: "perfHud"
 };
 
@@ -46,9 +51,6 @@ function createGameUiAdapter(doc = document){
       const speed = Number.isFinite(n) ? n : 1;
       if (refs.speedSlider) refs.speedSlider.value = speed.toFixed(1);
       if (refs.speedLabel) refs.speedLabel.textContent = `${speed.toFixed(1)}x`;
-    },
-    toggleCheatPanel(){
-      if (refs.cheatPanel) refs.cheatPanel.classList.toggle("hidden");
     }
   };
 }

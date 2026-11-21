@@ -1,5 +1,5 @@
 import { CFG } from "./config.js";
-import { clamp, dist2, now, formatCompact, pickN } from "./utils.js";
+import { clamp, dist2, random, now, formatCompact, pickN } from "./utils.js";
 import { applyPhysicalDamage, applyMagicDamage } from "./damage.js";
 import { scaleForWave, wavePlan } from "./waves.js";
 import { acquireFloatingText } from "./projectiles.js";
@@ -10,6 +10,16 @@ const ENEMY_TYPES = {
     siphon: { name:"Siphoner", HP: 230, Speed: 0.95, Armor: 6, MR: 18, Wealth: 20 },
     boss:   { name:"Boss",   HP: 999, Speed: 0.30, Armor: 26, MR: 18, Wealth: 999 }
   };
+
+const FIRST_BOSS_WAVE = 10;
+// The cast happens at the end of its windup. Exposure lasts for the whole final phase.
+const FIRST_BOSS_PHASES = [
+  { label: "Cleanse", seconds: 6, cast: "cleanse" },
+  { label: "Summon", seconds: 4, cast: "summon" },
+  { label: "Exposed", seconds: 5, bonusPct: 35 }
+];
+const [cleansePhase, summonPhase, exposedPhase] = FIRST_BOSS_PHASES;
+const FIRST_BOSS_BRIEFING = `After ${cleansePhase.seconds}s, Cleanse clears slows and roots and removes ${Math.round((1 - CFG.BOSS_CLEANSE_POISON_KEEP_PCT) * 100)}% of poison stacks. ${summonPhase.seconds}s later, Summon calls ${CFG.BOSS_SUMMON_BASE} reinforcements. Focus the boss during the next ${exposedPhase.seconds}s: Exposed grants +${exposedPhase.bonusPct}% damage taken. Then the cycle repeats.`;
 
 const ENEMY_AFFIXES = [
     { id:"armored", name:"Armored" },
@@ -34,7 +44,7 @@ const AFFIX_INFO = {
     let chance = CFG.ELITE_CHANCE_BASE + (wave - CFG.ELITE_START_WAVE) * CFG.ELITE_CHANCE_PER_WAVE;
     chance = Math.min(chance, CFG.ELITE_CHANCE_MAX);
     if (isBoss) chance *= CFG.ELITE_BOSS_CHANCE_MULT;
-    if (Math.random() > chance) return [];
+    if (random() > chance) return [];
 
     const ids = ENEMY_AFFIXES.map(a => a.id);
     return pickN(ids, Math.min(1, ids.length));
@@ -239,8 +249,11 @@ function computePrevWaveTotals(prevWave) {
       this._towerRangeScratch = [];
 
       this.bossSkills = null;
-      if (this.isBoss) {
-        const init = (cd) => cd * (0.6 + Math.random() * 0.4);
+      if (this.isBoss && wave === FIRST_BOSS_WAVE) {
+        this.firstBossPhaseIndex = 0;
+        this.phaseSecondsLeft = this.firstBossPhase.seconds;
+      } else if (this.isBoss) {
+        const init = (cd) => cd * (0.6 + random() * 0.4);
         this.bossSkills = {
           cleanse: { id: "cleanse", name: "Cleanse", cd: CFG.BOSS_SKILL_CLEANSE_CD, timer: init(CFG.BOSS_SKILL_CLEANSE_CD) },
           heal:    { id: "heal",    name: "Heal",    cd: CFG.BOSS_SKILL_HEAL_CD,    timer: init(CFG.BOSS_SKILL_HEAL_CD) },
@@ -457,7 +470,7 @@ function computePrevWaveTotals(prevWave) {
     // Rastgele bir affix siler ve statlari yeniden hesaplar.
     dispelOneAffix(){
       if (!this.affixIds || this.affixIds.length === 0) return null;
-      const idx = Math.floor(Math.random() * this.affixIds.length);
+      const idx = Math.floor(random() * this.affixIds.length);
       const removed = this.affixIds.splice(idx, 1)[0];
       this.recomputeModifiers();
       return removed;
@@ -471,7 +484,15 @@ function computePrevWaveTotals(prevWave) {
     update(dt){
       if(this.dead || this.reachedExit) return;
 
-      if (this.isBoss && this.bossSkills) {
+      if (this.firstBossPhaseIndex !== undefined) {
+        this.phaseSecondsLeft -= dt;
+        while (this.phaseSecondsLeft <= 1e-9) {
+          const { cast } = this.firstBossPhase;
+          if (cast) this.castBossSkill(cast);
+          this.firstBossPhaseIndex = (this.firstBossPhaseIndex + 1) % FIRST_BOSS_PHASES.length;
+          this.phaseSecondsLeft += this.firstBossPhase.seconds;
+        }
+      } else if (this.bossSkills) {
         for (const s of Object.values(this.bossSkills)) {
           if (!s.active) continue;
           s.timer -= dt;
@@ -543,6 +564,9 @@ function computePrevWaveTotals(prevWave) {
         }
       }
 
+      // A DOT kill and an exit are mutually exclusive terminal outcomes.
+      if (this.dead) return;
+
       // Frostbite DOT
       // Frostbite DOT tickleri.
       if (this.frostbiteDotTime > 0) {
@@ -559,6 +583,8 @@ function computePrevWaveTotals(prevWave) {
           }
         }
       }
+
+      if (this.dead) return;
 
       if (this.frostbiteTime > 0) {
         this.frostbiteTime = Math.max(0, this.frostbiteTime - dt);
@@ -580,27 +606,31 @@ function computePrevWaveTotals(prevWave) {
         ? 0
         : Math.min(10, this.baseSpeed * slowMul);
 
-      // Path uzerinde bir sonraki node'a dogru ilerle.
+      // Path uzerinde bir sonraki node'a dogru ilerle. A delayed simulation
+      // step may cross multiple nodes, so carry its remaining distance forward.
       const path=this.map.path;
-      const targetIdx=Math.min(this.pathIndex+1, path.length-1);
-      const t=path[targetIdx];
-      const tx=t.x+0.5, ty=t.y+0.5;
-
-      const dx=tx-this.x, dy=ty-this.y;
-      const d=Math.hypot(dx,dy);
-      if(d<0.001){
-        this.pathIndex=targetIdx;
-        if(this.pathIndex>=path.length-1) this.reachedExit=true;
-        return;
-      }
-      const step=speed*dt;
-      if(step>=d){
-        this.x=tx; this.y=ty;
-        this.pathIndex=targetIdx;
-        if(this.pathIndex>=path.length-1) this.reachedExit=true;
-      }else{
-        this.x+=(dx/d)*step;
-        this.y+=(dy/d)*step;
+      let remainingDistance=speed*dt;
+      while (!this.reachedExit) {
+        const targetIdx=Math.min(this.pathIndex+1, path.length-1);
+        const t=path[targetIdx];
+        const tx=t.x+0.5, ty=t.y+0.5;
+        const dx=tx-this.x, dy=ty-this.y;
+        const d=Math.hypot(dx,dy);
+        if(d<0.001){
+          this.pathIndex=targetIdx;
+          if(this.pathIndex>=path.length-1) this.reachedExit=true;
+          continue;
+        }
+        if (remainingDistance <= 0.000001) break;
+        const travelled=Math.min(remainingDistance, d);
+        this.x+=(dx/d)*travelled;
+        this.y+=(dy/d)*travelled;
+        remainingDistance-=travelled;
+        if(travelled >= d - 0.000001){
+          this.x=tx; this.y=ty;
+          this.pathIndex=targetIdx;
+          if(this.pathIndex>=path.length-1) this.reachedExit=true;
+        }
       }
 
       // Siphon aura: menzil icindeki tower manasini azalt.
@@ -630,22 +660,23 @@ function computePrevWaveTotals(prevWave) {
     //    applyMagicDamage(magicRaw, this.mr, magicPenFlat)
     // 3) Global savunmasiz kalma carpani (blizzard vuln) eklenir.
     // 4) Son hasar HP'den duser; floater/kill/summon gibi yan etkiler tetiklenir.
-    takeDamage(physRaw, magicRaw, armorPenPct, magicPenFlat, sourceTower, showFloat=true, isDot=false, floatColor=null) {
+    takeDamage(physRaw, magicRaw, armorPenPct, magicPenFlat, sourceTower, showFloat=true, isDot=false, floatColor=null, isCrit=!!sourceTower?._lastShotWasCrit) {
       if(this.dead) return 0;
 
       let dealt=0;
       if(physRaw>0) dealt += applyPhysicalDamage(physRaw, this.armor, armorPenPct);
       if(magicRaw>0) dealt += applyMagicDamage(magicRaw, this.mr, magicPenFlat);
-      const vulnMul = this._blizVulnMul || 1;
-      dealt *= vulnMul;
-      if (this.game?.recordDamage) this.game.recordDamage(dealt, sourceTower || null);
+      dealt *= this.damageTakenMultiplier;
+      const hpBefore = Math.max(0, Number(this.hp) || 0);
+      const actual = Math.min(dealt, hpBefore);
+      const overkill = Math.max(0, dealt - actual);
+      if (this.game?.recordDamage) this.game.recordDamage(actual, sourceTower || null, overkill);
 
-      this.hp -= dealt;
+      this.hp -= actual;
       if (sourceTower) this.lastHitTower = sourceTower;
 
-      if (showFloat && dealt > 0.5 && this.game) {
-        const isCrit = !!sourceTower?._lastShotWasCrit;
-        const txt = isCrit ? `💥 ${formatCompact(dealt)}` : `${formatCompact(dealt)}`;
+      if (showFloat && actual > 0.5 && this.game) {
+        const txt = isCrit ? `💥 ${formatCompact(actual)}` : `${formatCompact(actual)}`;
         this.game.floaters.push(acquireFloatingText(this.x, this.y - 0.35, txt, CFG.FLOAT_TEXT_LIFE, isCrit ? CFG.FLOAT_TEXT_CRIT_SIZE : CFG.FLOAT_TEXT_SIZE, isCrit, false, floatColor));
       }
 
@@ -665,7 +696,23 @@ function computePrevWaveTotals(prevWave) {
           if (this.lastHitTower.game?.recordKill) this.lastHitTower.game.recordKill(this.lastHitTower);
         }
       }
-      return dealt;
+      return actual;
+    }
+
+    get firstBossPhase(){
+      return FIRST_BOSS_PHASES[this.firstBossPhaseIndex];
+    }
+
+    get firstBossStatus(){
+      const phase = this.firstBossPhase;
+      if (!phase) return "";
+      const seconds = Math.ceil(Math.min(phase.seconds, this.phaseSecondsLeft));
+      return phase.cast ? `${phase.label} in ${seconds}s` : `${phase.label} · +${phase.bonusPct}% damage taken · ${seconds}s left`;
+    }
+
+    get damageTakenMultiplier(){
+      const phaseBonus = this.firstBossPhase?.bonusPct ?? 0;
+      return (this._blizVulnMul || 1) * (1 + phaseBonus / 100);
     }
 
     // Boss AI karar sirasi: cleanse > heal > summon.
@@ -695,6 +742,7 @@ function computePrevWaveTotals(prevWave) {
         this.slowPct = 0;
         this.slowTime = 0;
         this.slowByTower.clear();
+        this.rootTime = 0;
         this.poisonStacks *= CFG.BOSS_CLEANSE_POISON_KEEP_PCT;
         if (this.poisonByTower.size) {
           for (const [tower, stacks] of this.poisonByTower.entries()) {
@@ -736,4 +784,4 @@ function computePrevWaveTotals(prevWave) {
   // Effects
   // =========================================================
   
-export { ENEMY_TYPES, computePrevWaveTotals, listEnemyModifiers, Enemy };
+export { ENEMY_TYPES, FIRST_BOSS_WAVE, FIRST_BOSS_BRIEFING, computePrevWaveTotals, listEnemyModifiers, Enemy };

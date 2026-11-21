@@ -24,8 +24,6 @@
       transition: filter 220ms ease, transform 220ms ease;
     }
     body.mainMenuOpen .wrap{
-      filter: blur(2px) brightness(0.48) saturate(0.76);
-      transform: scale(1.01);
       pointer-events: none;
       user-select: none;
     }
@@ -81,7 +79,7 @@
       visibility: hidden;
     }
     .menuSidePanel h3{
-      margin: 0 0 8px;
+      margin: 0;
       font-size: 16px;
       letter-spacing: 0.5px;
       color: rgba(224,242,254,0.98);
@@ -89,6 +87,13 @@
     }
     .menuSideLeft{ left: max(10px, calc(50% - 740px)); }
     .menuSideRight{ right: max(10px, calc(50% - 740px)); }
+    .menuRarityHead{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
     .menuRarityList{
       display:grid;
       grid-template-columns: 1fr;
@@ -105,6 +110,54 @@
       font-size: 13px;
       font-weight: 700;
     }
+    .menuRarityPctWrap{
+      display:inline-flex;
+      align-items:center;
+      justify-content:flex-end;
+      min-width: 132px;
+      position: relative;
+      padding-right: 0;
+      overflow: visible;
+    }
+    .menuRarityPctWrap [data-rarity-pct]{
+      display:inline-block;
+      min-width: 58px;
+      text-align: right;
+      transform: translateX(0);
+      transition: transform 150ms ease;
+    }
+    .menuRarityDelta{
+      position: absolute;
+      right: 0;
+      top: 50%;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.1px;
+      opacity: 0;
+      transform: translate(8px, -50%);
+      transition: opacity 120ms ease, transform 120ms ease;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+    .menuSidePanel.rarityPreviewOpen .menuRarityPctWrap [data-rarity-pct]{
+      transform: translateX(-48px);
+    }
+    .menuSidePanel.rarityPreviewOpen .menuRarityDelta{
+      opacity: 1;
+      transform: translate(0, -50%);
+    }
+    .menuRarityDelta.up{
+      color: rgba(74,222,128,0.98);
+      text-shadow: 0 0 10px rgba(34,197,94,0.38);
+    }
+    .menuRarityDelta.down{
+      color: rgba(248,113,113,0.98);
+      text-shadow: 0 0 10px rgba(239,68,68,0.35);
+    }
+    .menuRarityDelta.flat{
+      color: rgba(226,232,240,0.8);
+      text-shadow: none;
+    }
     .menuRarityCard.rarity-common{ background: rgba(255,255,255,0.05); border-color: rgba(255,255,255,0.15); }
     .menuRarityCard.rarity-uncommon{ background: rgba(34,197,94,0.14); border-color: rgba(34,197,94,0.45); }
     .menuRarityCard.rarity-rare{ background: rgba(59,130,246,0.16); border-color: rgba(59,130,246,0.50); }
@@ -114,6 +167,150 @@
       background: radial-gradient(circle at 15% 10%, rgba(255,255,255,0.36), rgba(255,217,110,0.22) 42%, rgba(255,255,255,0.06));
       border-color: rgba(255,230,150,0.82);
       box-shadow: 0 0 12px rgba(255,230,150,0.30);
+    }
+    .menuRarityActions{
+      display:grid;
+      grid-template-columns: auto 1fr auto;
+      align-items:center;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .menuSidePanel.rarityIntroActive{
+      border-color: rgba(250,204,21,0.72);
+      box-shadow:
+        0 0 0 1px rgba(250,204,21,0.28),
+        0 0 22px rgba(250,204,21,0.24),
+        0 16px 46px rgba(0,0,0,0.45),
+        inset 0 0 22px rgba(250,204,21,0.14);
+      animation: rarityIntroPulse 1.4s ease-in-out infinite;
+    }
+    .menuRarityIntroCallout{
+      margin-top: 10px;
+      border-radius: 11px;
+      border: 1px solid rgba(250,204,21,0.52);
+      background: linear-gradient(160deg, rgba(250,204,21,0.16), rgba(30,41,59,0.80));
+      padding: 8px 10px;
+      color: rgba(254,249,195,0.97);
+      box-shadow: inset 0 0 12px rgba(250,204,21,0.14);
+    }
+    .menuRarityIntroTitle{
+      font-family: "Orbitron", "Rajdhani", system-ui, sans-serif;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+      margin-bottom: 2px;
+    }
+    .menuRarityIntroText{
+      font-size: 12px;
+      line-height: 1.34;
+      color: rgba(254,243,199,0.95);
+    }
+    .menuRarityUpgradeBtn{
+      width: 100%;
+      min-width: 0;
+      margin: 0;
+      padding: 8px 12px;
+      border-radius: 14px;
+      border: 1px solid rgba(250,204,21,0.72);
+      background:
+        radial-gradient(circle at 16% 20%, rgba(255,236,153,0.30), rgba(255,236,153,0.05) 48%),
+        linear-gradient(160deg, rgba(147,51,234,0.28), rgba(250,204,21,0.26)),
+        linear-gradient(160deg, rgba(30,41,59,0.92), rgba(15,23,42,0.92));
+      color: rgba(241,245,249,0.98);
+      font-family: "Orbitron", "Rajdhani", system-ui, sans-serif;
+      font-size: 18px;
+      font-weight: 900;
+      letter-spacing: 0.9px;
+      text-transform: uppercase;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      gap: 10px;
+      box-shadow:
+        0 8px 20px rgba(0,0,0,0.36),
+        inset 0 0 9px rgba(255,255,255,0.16),
+        0 0 16px rgba(250,204,21,0.26);
+      transition: transform 120ms ease, filter 120ms ease, opacity 120ms ease;
+    }
+    .menuRarityUpgradeBtn:hover:not(:disabled){
+      filter: brightness(1.08);
+      transform: translateY(-1px);
+    }
+    .menuRarityUpgradeBtn:disabled{
+      opacity: 0.58;
+      cursor: not-allowed;
+      filter: saturate(0.68);
+      transform: none;
+    }
+    .menuRarityMiniBtn{
+      min-width: 66px;
+      padding: 6px 8px;
+      border-radius: 10px;
+      border: 1px solid rgba(148,163,184,0.56);
+      background: linear-gradient(160deg, rgba(15,23,42,0.92), rgba(30,41,59,0.90));
+      color: rgba(226,232,240,0.96);
+      font-family: "Rajdhani", system-ui, sans-serif;
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.3px;
+      transition: filter 120ms ease, transform 120ms ease, border-color 120ms ease;
+    }
+    .menuRarityMiniBtn:hover{
+      filter: brightness(1.08);
+      transform: translateY(-1px);
+    }
+    .menuRarityMiniBtn.details{
+      border-color: rgba(148,163,184,0.56);
+      background: linear-gradient(160deg, rgba(51,65,85,0.92), rgba(30,41,59,0.90));
+    }
+    .menuRarityMiniBtn.reset{
+      border-color: rgba(244,114,182,0.62);
+      background: linear-gradient(160deg, rgba(190,24,93,0.52), rgba(127,29,29,0.80));
+      color: rgba(255,241,242,0.98);
+    }
+    .menuRarityDetailsPanel{
+      margin-top: 10px;
+      border-radius: 12px;
+      border: 1px solid rgba(148,163,184,0.36);
+      background: linear-gradient(160deg, rgba(2,6,23,0.84), rgba(8,47,73,0.62));
+      padding: 8px;
+      max-height: 240px;
+      overflow: auto;
+      display:grid;
+      gap: 4px;
+    }
+    .menuRarityDetailsPanel.hidden{
+      display: none;
+    }
+    .menuRarityDetailHead,
+    .menuRarityDetailRow{
+      display:grid;
+      grid-template-columns: 52px repeat(6, minmax(34px, 1fr));
+      gap: 4px;
+      align-items:center;
+      font-size: 10px;
+      line-height: 1.2;
+    }
+    .menuRarityDetailHead{
+      font-weight: 800;
+      color: rgba(186,230,253,0.96);
+      border-bottom: 1px solid rgba(125,211,252,0.25);
+      padding-bottom: 4px;
+      margin-bottom: 2px;
+    }
+    .menuRarityDetailRow{
+      font-weight: 700;
+      color: rgba(226,232,240,0.93);
+      padding: 2px 0;
+    }
+    .menuRarityDetailRow .lv{
+      color: rgba(125,211,252,0.96);
+      font-weight: 800;
+    }
+    @keyframes rarityIntroPulse{
+      0%, 100%{ filter: brightness(1); }
+      50%{ filter: brightness(1.07); }
     }
     .menuCodexSection{
       border: 1px solid rgba(148,163,184,0.30);
@@ -437,8 +634,6 @@
       pointer-events: none;
     }
     body.mapSelectOpen .wrap{
-      filter: blur(2px) brightness(0.40) saturate(0.75);
-      transform: scale(1.01);
       pointer-events: none;
       user-select: none;
     }
@@ -604,6 +799,9 @@
       padding: 14px 14px 18px;
       transition: transform 150ms ease, box-shadow 150ms ease, filter 150ms ease;
     }
+    .mapCard.wipCard{
+      z-index: 5;
+    }
     .mapCard.playable:hover{
       z-index: 12;
       transform: translateY(-3px);
@@ -613,6 +811,11 @@
     .mapCard:focus-visible,
     .mapCard:focus-within{
       z-index: 12;
+    }
+    .mapCard.wipCard:hover,
+    .mapCard.wipCard:focus-visible,
+    .mapCard.wipCard:focus-within{
+      z-index: 14;
     }
     .mapCard.locked{
       cursor: not-allowed;
@@ -642,11 +845,32 @@
       pointer-events:none;
     }
     .mapCardName,
+    .mapCardWip,
+    .mapCardTarget,
     .mapCardStars,
     .mapCardStats,
     .mapCardLock{
       position:relative;
       z-index:1;
+    }
+    .mapCardWip{
+      position:absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%) rotate(-14deg);
+      font-family: "Orbitron", "Rajdhani", system-ui, sans-serif;
+      font-size: clamp(20px, 2.7vw, 34px);
+      font-weight: 900;
+      letter-spacing: 1.4px;
+      text-transform: uppercase;
+      color: rgba(248,113,113,0.95);
+      text-shadow:
+        0 0 14px rgba(239,68,68,0.55),
+        0 0 28px rgba(127,29,29,0.45);
+      opacity: 0.86;
+      pointer-events: none;
+      white-space: nowrap;
+      z-index: 2;
     }
     .mapCardName{
       margin-top: 8px;
@@ -657,8 +881,17 @@
       color: rgba(240,249,255,0.98);
       text-shadow: 0 2px 10px rgba(2,6,23,0.75);
     }
-    .mapCardStars{
+    .mapCardTarget{
       margin-top: auto;
+      text-align: center;
+      font-size: 17px;
+      font-weight: 800;
+      color: rgba(186,230,253,0.96);
+      text-shadow: 0 1px 8px rgba(14,116,144,0.42);
+      letter-spacing: 0.25px;
+    }
+    .mapCardStars{
+      margin-top: 6px;
       margin-bottom: 12px;
       min-height: 86px;
       display:flex;
@@ -754,7 +987,8 @@
     }
     .mapStar.star2,
     .mapStar.star3,
-    .mapStar.star4{
+    .mapStar.star4,
+    .mapStar.star5{
       font-size: 44px;
       margin-bottom: 6px;
     }
@@ -764,7 +998,8 @@
     }
     .mapStar.star2.lit,
     .mapStar.star3.lit,
-    .mapStar.star4.lit{
+    .mapStar.star4.lit,
+    .mapStar.star5.lit{
       color: rgba(241,245,249,0.98);
       text-shadow: 0 0 10px rgba(125,211,252,0.90), 0 0 22px rgba(56,189,248,0.62);
     }
@@ -1139,14 +1374,12 @@
       position: relative;
     }
     .mainMenuStars{
-      position: absolute;
-      top: 10px;
-      right: max(10px, calc(50% - 740px));
-      margin: 0;
+      position: relative;
+      margin: 0 0 0 auto;
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      padding: 7px 12px;
+      padding: 5px 10px;
       border-radius: 999px;
       border: 1px solid rgba(250,204,21,0.60);
       background:
@@ -1160,8 +1393,8 @@
         0 0 0 1px rgba(234,179,8,0.16),
         0 8px 20px rgba(0,0,0,0.38),
         inset 0 0 12px rgba(250,204,21,0.18);
-      z-index: 11;
-      pointer-events: none;
+      z-index: 2;
+      pointer-events: auto;
     }
     .mainMenuStars::before{
       content: "\2605";
@@ -1380,6 +1613,7 @@
       gap:10px;
     }
     .canvasWrap{
+      position: relative;
       flex:1 1 auto;
       min-width:0;
       min-height:0;
@@ -1388,6 +1622,31 @@
       border:1px solid rgba(255,255,255,0.08);
       overflow:hidden;
       background:#0f172a;
+    }
+    .mapWipBanner{
+      position: absolute;
+      left: 50%;
+      top: 10px;
+      transform: translateX(-50%);
+      min-width: min(58%, 520px);
+      max-width: calc(100% - 36px);
+      padding: 0 18px;
+      border-radius: 14px;
+      border: 1px solid rgba(248,113,113,0.62);
+      background: linear-gradient(180deg, rgba(127,29,29,0.82), rgba(69,10,10,0.90));
+      box-shadow:
+        0 12px 28px rgba(0,0,0,0.42),
+        0 0 22px rgba(239,68,68,0.20);
+      color: rgba(255,241,242,0.98);
+      font-family: "Orbitron", "Rajdhani", system-ui, sans-serif;
+      font-weight: 900;
+      letter-spacing: 1.6px;
+      text-align: center;
+      text-transform: uppercase;
+      text-shadow: 0 0 12px rgba(254,202,202,0.18);
+      pointer-events: none;
+      z-index: 4;
+      white-space: nowrap;
     }
     canvas { background:#0f172a; display:block; width:100%; height:100%; }
 
@@ -1434,7 +1693,33 @@
       font-size:11px;
       letter-spacing:0.4px;
       text-transform:uppercase;
-      opacity:0.7;
+      opacity:0.88;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap: 8px;
+      line-height: 1.15;
+    }
+    .hudLogRarityLv{
+      font-family: "Orbitron", "Rajdhani", system-ui, sans-serif;
+      font-size: 12px;
+      font-weight: 900;
+      letter-spacing: 0.45px;
+      color: rgba(250,204,21,0.98);
+      text-shadow:
+        0 0 10px rgba(250,204,21,0.55),
+        0 0 18px rgba(251,191,36,0.35);
+      white-space: nowrap;
+    }
+    .menuRarityDetailRow.active{
+      border-radius: 8px;
+      background: linear-gradient(160deg, rgba(250,204,21,0.20), rgba(15,23,42,0.38));
+      box-shadow: inset 0 0 0 1px rgba(250,204,21,0.48);
+      color: rgba(254,249,195,0.98);
+    }
+    .menuRarityDetailRow.active .lv{
+      color: rgba(254,240,138,0.98);
+      text-shadow: 0 0 8px rgba(250,204,21,0.45);
     }
     .hudLogBody{
       overflow:auto;
@@ -1446,11 +1731,6 @@
       padding:3px 0;
       border-bottom:1px dashed rgba(255,255,255,0.06);
     }
-    .logCheatToggle{
-      cursor:pointer;
-      color: inherit;
-    }
-    .logCheatToggle:hover{ text-decoration: underline; }
     #hudSelected h3{
       margin: 0 0 6px;
       font-size: 13px;
@@ -1521,6 +1801,14 @@
     .selBtnRow{ display:flex; gap:8px; }
     .selBtnRow button{ flex:1; padding:8px; font-size:14px; }
     .selBtnRow.single button{ width:100%; }
+    #archerPathPicker{
+      min-width:0; margin:4px 0 10px; padding:8px;
+      border:1px solid #42627a; border-radius:8px;
+    }
+    #archerPathPicker legend{ color:#bae6fd; font-size:12px; font-weight:700; }
+    #archerPathPicker button{ width:100%; text-align:left; padding:6px 8px; }
+    #archerPathPicker button + button{ margin-top:5px; }
+    #archerPathPicker small{ display:block; margin-top:2px; font-weight:400; line-height:1.4; }
 
     /* =========
        RIGHT UI
@@ -1791,17 +2079,6 @@
       background: rgba(250,204,21,0.28);
       color: rgba(254,243,199,0.98);
     }
-    #cheatPanel .cheatFormulaDebug{
-      margin-top: 6px;
-      padding: 6px 7px;
-      border: 1px solid rgba(56,189,248,0.42);
-      border-radius: 8px;
-      background: rgba(15,23,42,0.50);
-      color: rgba(186,230,253,0.95);
-      font-size: 10px;
-      line-height: 1.35;
-      letter-spacing: 0.15px;
-    }
     .shopSpeedGroup{
       margin-top:auto;
       display:flex;
@@ -1817,6 +2094,14 @@
       flex-direction:column;
     }
     .wavePanel{ flex:0 0 auto; }
+    .waveForecast{
+      margin:0;
+      font-size:12px;
+      line-height:1.45;
+      color:#c9d9ec;
+      font-variant-numeric:tabular-nums;
+    }
+    #waveBossIntel{ border-left:2px solid #facc15; padding-left:8px; }
     .cheatPanel{ }
     .speedHead{
       display:flex;
@@ -1947,6 +2232,35 @@
       grid-column: 1 / -1;
       width: min(220px, 72%);
       justify-self: center;
+    }
+    #gameOverMainMenuBtn.upgradeAvailable{
+      border-color: rgba(250,204,21,0.88);
+      color: rgba(254,249,195,0.98);
+      animation: gameOverMainMenuGlow 1.6s linear infinite;
+    }
+    .gameOverUpgradeHint{
+      margin-top: 10px;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.35px;
+      color: rgba(250,204,21,0.98);
+      text-shadow:
+        0 0 8px rgba(250,204,21,0.45),
+        0 0 14px rgba(56,189,248,0.24);
+    }
+    @keyframes gameOverMainMenuGlow{
+      0%{
+        box-shadow: 0 0 0 1px rgba(250,204,21,0.26), 0 0 14px rgba(250,204,21,0.30);
+        filter: hue-rotate(0deg);
+      }
+      50%{
+        box-shadow: 0 0 0 1px rgba(56,189,248,0.38), 0 0 18px rgba(56,189,248,0.38);
+        filter: hue-rotate(100deg);
+      }
+      100%{
+        box-shadow: 0 0 0 1px rgba(244,114,182,0.34), 0 0 16px rgba(244,114,182,0.36);
+        filter: hue-rotate(220deg);
+      }
     }
     .choiceGrid{ display:grid; grid-template-columns: 1fr; gap: 10px; }
     .choiceBtn{
@@ -2198,7 +2512,6 @@
       flex-direction:column;
       gap:10px;
     }
-
     .statsModal{
       width: min(900px, 96vw);
     }
@@ -2464,8 +2777,89 @@
       }
     }
     @media (max-width: 780px){
-      .sideHud{ width:220px; flex-basis:220px; }
-      .ui{ width:280px; min-width:280px; flex-basis:280px; }
+      .wrap{
+        flex-direction: column;
+      }
+      .gameArea{
+        order: 1;
+        width: 100%;
+        height: auto;
+        flex: 1 1 auto;
+        min-height: 0;
+        padding: 6px;
+        gap: 6px;
+      }
+      .canvasWrap{
+        order: 1;
+        width: 100%;
+        height: auto;
+        flex: 1 1 auto;
+        min-height: 0;
+      }
+      .sideHud{
+        order: 2;
+        width: 100%;
+        height: auto;
+        flex: 0 0 clamp(118px, 18vh, 150px);
+        display: grid;
+        grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+        gap: 6px;
+      }
+      #hudSelected,
+      #hudLog{
+        min-height: 0;
+        overflow: auto;
+        padding: 8px;
+      }
+      #hudLog{
+        flex: 1 1 auto;
+      }
+      .ui{
+        order: 2;
+        width: 100%;
+        min-width: 0;
+        height: auto;
+        flex: 0 0 min(43vh, 370px);
+        max-height: 43vh;
+        box-sizing: border-box;
+        padding: 6px;
+        gap: 6px;
+        border-left: 0;
+        border-top: 1px solid rgba(255,255,255,0.08);
+        overflow: auto;
+      }
+      .statsGrid{
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 6px;
+      }
+      .statItem{
+        padding: 7px 8px;
+        font-size: 12px;
+      }
+      .statItem .v{
+        font-size: 15px;
+      }
+      .shopSpeedGroup{
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
+        grid-template-areas:
+          "wave speed"
+          "shop shop";
+        gap: 6px;
+        flex: 1 1 auto;
+      }
+      .wavePanel{ grid-area: wave; }
+      .speedPanel{ grid-area: speed; }
+      .shopPanel{
+        grid-area: shop;
+        min-height: 124px;
+      }
+      .shopWrap{
+        min-height: 88px;
+      }
+      #shop{
+        gap: 6px;
+      }
       .menuSidePanel{
         display: none;
       }
@@ -2572,12 +2966,16 @@
       .mapCardName{
         font-size: 22px;
       }
+      .mapCardTarget{
+        font-size: 14px;
+      }
       .mapStar.star1{
         font-size: 52px;
       }
       .mapStar.star2,
       .mapStar.star3,
-      .mapStar.star4{
+      .mapStar.star4,
+      .mapStar.star5{
         font-size: 38px;
       }
       .mapEditorOpenBtn{

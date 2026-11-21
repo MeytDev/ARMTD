@@ -22,11 +22,26 @@ import {
   loadSettings,
   saveSettings
 } from "./preferences.js";
+import {
+  getSpecialRarityTableAtLevel,
+  setSpecialRarityUpgradeLevel,
+  SPECIAL_RARITY_UPGRADE_MAX_LEVEL
+} from "./towers.js";
+import { isDevToolsEnabled } from "./devtools.js";
+import { ARCHER_PATHS, ARCHER_SPECIALIZATION_LEVEL } from "./archer_specialization.js";
+import { FIRST_BOSS_WAVE, FIRST_BOSS_BRIEFING } from "./enemies.js";
 
 const RUN_SAVE_KEY = "armtd_run_save_v1";
+const RUN_SAVE_BACKUP_KEY = "armtd_run_save_backup_v1";
 const MAP_PROGRESS_KEY = "armtd_map_progress_v1";
 const MAP_PROGRESS_SCHEMA = 1;
 const MAP_CARD_COUNT = Math.max(1, Number(CONTENT_REGISTRY.maps.campaignCardCount) || 1);
+const STAR_DEBUG_BONUS = 0; // disabled for live gameplay
+const RARITY_UPGRADE_MAX_LEVEL = Math.max(1, Math.floor(Number(SPECIAL_RARITY_UPGRADE_MAX_LEVEL) || 8));
+// The first seven steps keep the Fibonacci cadence. The final cap is 17 rather
+// than 21 so all eight levels cost exactly the campaign's 50 available stars.
+const RARITY_UPGRADE_COST_HEAD = Object.freeze([1, 1, 2, 3, 5, 8, 13, 17]);
+const RARITY_UPGRADE_INTRO_MIN_STARS = 1;
 const MAP_PAGE_SIZE = 5;
 const MAP_EDITOR_W = 20;
 const MAP_EDITOR_H = 15;
@@ -35,6 +50,9 @@ const MAP_EDITOR_X_CODES = "abcdefghijklmnopqrst";
 const MAP_EDITOR_Y_CODES = "0123456789!?#*=";
 const CUSTOM_MAPS_KEY = "armtd_custom_maps_v1";
 const CUSTOM_MAPS_SCHEMA = 1;
+const MAX_MAP_CODE_LENGTH = 4096;
+const MAX_CUSTOM_MAPS = 100;
+const MAX_CUSTOM_MAP_ID_LENGTH = 64;
 const PERSISTENT_STATS_KEY = "armtd_stats_lifetime_v1";
 const HIGH_KILLS_KEY = "td_highkills_v2";
 const RELEASE_RESET_KEY = "armtd_release_reset_0_4_13";
@@ -42,12 +60,14 @@ const START_GOLD_REWARD_KEY = "armtd_start_gold_reward_v1";
 const START_GOLD_REWARD_BONUS = 30;
 const MENU_CODEX_DRAW_ALPHA = 0.98;
 const BOOT_RETRY_KEY = "armtd_boot_retry_v1";
+const DEVTOOLS_ENABLED = isDevToolsEnabled();
 
 const canvas = document.getElementById("c");
 const bootVersionLabel = document.getElementById("menuVersionLabel");
 if (bootVersionLabel) bootVersionLabel.textContent = `v${GAME_VERSION}`;
 applyReleaseDataResetIfNeeded();
 const game = new Game(canvas);
+game.menuVisibility = isMainMenuOpen;
 
 try {
   const arr = JSON.parse(localStorage.getItem(HIGH_KILLS_KEY) || "[]");
@@ -82,7 +102,14 @@ const mapEditorState = {
 
 const bodyEl = document.body;
 const menuVersionLabel = document.getElementById("menuVersionLabel");
+const menuRarityPanel = document.getElementById("menuRarityPanel");
 const menuTotalStars = document.getElementById("menuTotalStars");
+const menuRarityDetailsBtn = document.getElementById("menuRarityDetailsBtn");
+const menuRarityUpgradeBtn = document.getElementById("menuRarityUpgradeBtn");
+const menuRarityResetBtn = document.getElementById("menuRarityResetBtn");
+const menuRarityDetailsPanel = document.getElementById("menuRarityDetailsPanel");
+const menuRarityIntroCallout = document.getElementById("menuRarityIntroCallout");
+const hudLogRarityLv = document.getElementById("hudLogRarityLv");
 const menuPatchNotes = document.getElementById("menuPatchNotes");
 const menuCodexPanel = document.getElementById("menuCodexPanel");
 const menuCodexDetailBack = document.getElementById("menuCodexDetailBack");
@@ -143,8 +170,47 @@ const settingsMusicMuteBtn = document.getElementById("settingsMusicMuteBtn");
 const settingsTutorialToggleBtn = document.getElementById("settingsTutorialToggleBtn");
 const settingsTutorialResetBtn = document.getElementById("settingsTutorialResetBtn");
 const settingsTutorialProgress = document.getElementById("settingsTutorialProgress");
+const settingsLowEffectsToggleBtn = document.getElementById("settingsLowEffectsToggleBtn");
 const settingsResetKeybindsBtn = document.getElementById("settingsResetKeybindsBtn");
 const settingsKeybindList = document.getElementById("settingsKeybindList");
+
+function ensureGraphicsSettings(){
+  if (!settings.graphics || typeof settings.graphics !== "object") {
+    settings.graphics = { lowEffects: false };
+  }
+  settings.graphics.lowEffects = !!settings.graphics.lowEffects;
+  return settings.graphics;
+}
+
+function isSystemReducedMotionEnabled(){
+  try {
+    return !!window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  } catch (_) {
+    return false;
+  }
+}
+
+function applyVisualSettings(){
+  const graphics = ensureGraphicsSettings();
+  const systemReducedMotion = isSystemReducedMotionEnabled();
+  const lowEffectsEnabled = graphics.lowEffects || systemReducedMotion;
+  window.__armtdLowEffects = graphics.lowEffects;
+  if (settingsLowEffectsToggleBtn) {
+    const systemSuffix = systemReducedMotion && !graphics.lowEffects ? " (System)" : "";
+    settingsLowEffectsToggleBtn.textContent = lowEffectsEnabled
+      ? `Reduced Effects ON${systemSuffix}`
+      : "Reduced Effects OFF";
+    settingsLowEffectsToggleBtn.setAttribute("aria-pressed", String(lowEffectsEnabled));
+    settingsLowEffectsToggleBtn.title = systemSuffix
+      ? "Enabled by the operating system's reduced-motion preference."
+      : "";
+  }
+}
+
+applyVisualSettings();
+try {
+  window.matchMedia?.("(prefers-reduced-motion: reduce)")?.addEventListener?.("change", applyVisualSettings);
+} catch (_) {}
 
 const statsBack = document.getElementById("statsBack");
 const statsCloseBtn = document.getElementById("statsCloseBtn");
@@ -164,6 +230,8 @@ const pauseMenuHandle = document.getElementById("pauseMenuHandle");
 const pauseSaveQuitBtn = document.getElementById("pauseSaveQuitBtn");
 const pauseSettingsBtn = document.getElementById("pauseSettingsBtn");
 const pauseResumeBtn = document.getElementById("pauseResumeBtn");
+const gameOverMainMenuBtn = document.getElementById("gameOverMainMenuBtn");
+const gameOverUpgradeHint = document.getElementById("gameOverUpgradeHint");
 bindGameplayEvents();
 
 tutorialController = createTutorialController({
@@ -175,7 +243,10 @@ tutorialController = createTutorialController({
     syncSettingsUI();
     if (tutorialController) tutorialController.handleSettingsChanged();
   },
-  isMainMenuOpen
+  isMainMenuOpen,
+  onComplete: () => {
+    if (!hasStartGoldRewardClaimed()) claimStartGoldReward();
+  }
 });
 if (typeof game.setTutorialHooks === "function") {
   game.setTutorialHooks({
@@ -183,11 +254,15 @@ if (typeof game.setTutorialHooks === "function") {
     onAction: (actionId, payload) => {
       if (!tutorialController) return;
       tutorialController.onAction(actionId, payload);
-    }
+    },
+    shouldUseScriptedSpecialChoice: () => (
+      tutorialController ? tutorialController.shouldUseScriptedSpecialChoice() : false
+    )
   });
 }
 
 initUI(game, {
+  devToolsEnabled: DEVTOOLS_ENABLED,
   getKeybinds: () => settings.keybinds,
   canUiAction: (actionId, payload) => tutorialController ? tutorialController.canAction(actionId, payload) : true,
   onUiAction: (actionId, payload) => {
@@ -232,7 +307,7 @@ if (menuVersionLabel) menuVersionLabel.textContent = `v${GAME_VERSION}`;
 renderMenuPatchNotes();
 updateContinueButton();
 syncSettingsUI();
-refreshMenuTotalStars();
+refreshMenuRarityPanel();
 resetMapEditorBlank();
 bindAutoSaveOnUnload();
 const bootTick = (typeof queueMicrotask === "function")
@@ -271,11 +346,8 @@ function applyReleaseDataResetIfNeeded(){
   try {
     const done = localStorage.getItem(RELEASE_RESET_KEY);
     if (done === "1") return;
-    localStorage.removeItem(PERSISTENT_STATS_KEY);
-    localStorage.removeItem(HIGH_KILLS_KEY);
-    localStorage.removeItem(MAP_PROGRESS_KEY);
-    localStorage.removeItem(RUN_SAVE_KEY);
-    localStorage.removeItem(PROGRESSION_KEY);
+    // Version changes must not silently erase player data. Any migration or
+    // reset is an explicit user action handled by the settings UI.
     localStorage.setItem(RELEASE_RESET_KEY, "1");
   } catch (_) {}
 }
@@ -292,9 +364,11 @@ function createDefaultMapProgress(){
   return {
     schema: MAP_PROGRESS_SCHEMA,
     updatedAt: Date.now(),
+    rarityUpgradeLevel: 0,
+    rarityIntroSeen: false,
     maps: Array.from({ length: MAP_CARD_COUNT }, () => ({
       maxWave: 0,
-      stars: { star1: false, star2: false, star3: false, star4: false }
+      stars: { star1: false, star2: false, star3: false, star4: false, star5: false }
     }))
   };
 }
@@ -303,6 +377,11 @@ function normalizeMapProgress(raw){
   const base = createDefaultMapProgress();
   if (!raw || typeof raw !== "object") return base;
   if (Math.floor(Number(raw.schema) || 0) !== MAP_PROGRESS_SCHEMA) return base;
+  base.rarityUpgradeLevel = Math.min(
+    RARITY_UPGRADE_MAX_LEVEL,
+    Math.max(0, Math.floor(Number(raw.rarityUpgradeLevel) || 0))
+  );
+  base.rarityIntroSeen = !!raw.rarityIntroSeen || base.rarityUpgradeLevel > 0;
   const maps = Array.isArray(raw.maps) ? raw.maps : [];
   for (let i = 0; i < MAP_CARD_COUNT; i += 1) {
     const src = maps[i] && typeof maps[i] === "object" ? maps[i] : null;
@@ -314,7 +393,8 @@ function normalizeMapProgress(raw){
         star1: !!starsRaw.star1,
         star2: !!starsRaw.star2,
         star3: !!starsRaw.star3,
-        star4: !!starsRaw.star4
+        star4: !!starsRaw.star4,
+        star5: !!starsRaw.star5
       }
     };
   }
@@ -339,7 +419,27 @@ function writeMapProgress(data){
   } catch (_) {}
 }
 
-function getTotalStars(progress = readMapProgress()){
+function getRarityUpgradeCostForLevel(level){
+  const idx = Math.max(0, Math.floor(Number(level) || 0));
+  if (idx < RARITY_UPGRADE_COST_HEAD.length) return RARITY_UPGRADE_COST_HEAD[idx];
+  let prev = RARITY_UPGRADE_COST_HEAD[RARITY_UPGRADE_COST_HEAD.length - 2];
+  let curr = RARITY_UPGRADE_COST_HEAD[RARITY_UPGRADE_COST_HEAD.length - 1];
+  for (let i = RARITY_UPGRADE_COST_HEAD.length; i <= idx; i += 1) {
+    const next = prev + curr;
+    prev = curr;
+    curr = next;
+  }
+  return curr;
+}
+
+function getRarityUpgradeTotalSpent(level){
+  const lv = Math.max(0, Math.floor(Number(level) || 0));
+  let total = 0;
+  for (let i = 0; i < lv; i += 1) total += getRarityUpgradeCostForLevel(i);
+  return total;
+}
+
+function getEarnedStars(progress = readMapProgress()){
   const maps = Array.isArray(progress?.maps) ? progress.maps : [];
   let total = 0;
   for (const item of maps) {
@@ -347,15 +447,170 @@ function getTotalStars(progress = readMapProgress()){
     if (item?.stars?.star2) total += 1;
     if (item?.stars?.star3) total += 1;
     if (item?.stars?.star4) total += 1;
+    if (item?.stars?.star5) total += 1;
   }
   return total;
 }
 
-function refreshMenuTotalStars(){
+function getRarityUpgradeLevel(progress = readMapProgress()){
+  return Math.min(
+    RARITY_UPGRADE_MAX_LEVEL,
+    Math.max(0, Math.floor(Number(progress?.rarityUpgradeLevel) || 0))
+  );
+}
+
+function isAdminPanelEnabled(){
+  return DEVTOOLS_ENABLED;
+}
+
+function syncInGameAdminPanel(){
+  const panel = document.getElementById("cheatPanel");
+  if (!panel) return;
+  panel.classList.toggle("hidden", !isAdminPanelEnabled());
+}
+
+function getAvailableStars(progress = readMapProgress()){
+  const earned = getEarnedStars(progress);
+  const bonus = Math.max(0, Math.floor(Number(STAR_DEBUG_BONUS) || 0));
+  const spent = getRarityUpgradeTotalSpent(getRarityUpgradeLevel(progress));
+  return Math.max(0, earned + bonus - spent);
+}
+
+function getRarityUpgradeAvailability(progress = readMapProgress()){
+  const level = getRarityUpgradeLevel(progress);
+  const maxed = level >= RARITY_UPGRADE_MAX_LEVEL;
+  const cost = maxed ? null : getRarityUpgradeCostForLevel(level);
+  const available = getAvailableStars(progress);
+  const canUpgrade = !maxed && available >= (cost ?? Infinity);
+  return { level, maxed, cost, available, canUpgrade };
+}
+
+function shouldShowRarityUpgradeIntro(progress = readMapProgress()){
+  const introSeen = !!progress?.rarityIntroSeen;
+  if (introSeen) return false;
+  const state = getRarityUpgradeAvailability(progress);
+  if (state.maxed || state.level > 0) return false;
+  const need = Math.max(RARITY_UPGRADE_INTRO_MIN_STARS, Number(state.cost) || 0);
+  return state.available >= need;
+}
+
+function syncRarityUpgradeIntro(progress = readMapProgress()){
+  const visible = shouldShowRarityUpgradeIntro(progress);
+  if (menuRarityPanel) menuRarityPanel.classList.toggle("rarityIntroActive", visible);
+  if (menuRarityIntroCallout) menuRarityIntroCallout.classList.toggle("hidden", !visible);
+}
+
+function syncGameOverUpgradeAvailability(progress = readMapProgress()){
+  const state = getRarityUpgradeAvailability(progress);
+  if (gameOverUpgradeHint) gameOverUpgradeHint.classList.toggle("hidden", !state.canUpgrade);
+  if (gameOverMainMenuBtn) gameOverMainMenuBtn.classList.toggle("upgradeAvailable", state.canUpgrade);
+}
+
+function applyRarityUpgradeLevel(progress = readMapProgress()){
+  setSpecialRarityUpgradeLevel(getRarityUpgradeLevel(progress));
+}
+
+function refreshMenuTotalStars(progress = readMapProgress()){
   if (!menuTotalStars) return;
-  const total = getTotalStars();
+  const total = getAvailableStars(progress);
   menuTotalStars.textContent = `Total Stars: ${total}`;
 }
+
+function formatRarityChance(chance){
+  const pct = Math.max(0, Number(chance) || 0) * 100;
+  return `${pct.toFixed(1)}%`;
+}
+
+function formatRarityDelta(deltaPct){
+  const abs = Math.abs(deltaPct);
+  const sign = deltaPct > 0 ? "+" : (deltaPct < 0 ? "-" : "\u00B1");
+  return `${sign}${abs.toFixed(1)}%`;
+}
+
+function setRarityPreviewVisible(visible){
+  if (!menuRarityPanel) return;
+  menuRarityPanel.classList.toggle("rarityPreviewOpen", !!visible);
+}
+
+function syncHudRarityLevel(level = getRarityUpgradeLevel()){
+  if (!hudLogRarityLv) return;
+  const lv = Math.max(0, Math.floor(Number(level) || 0));
+  hudLogRarityLv.textContent = `RARITY LV. ${lv}`;
+}
+
+function renderMenuRarityDetailsPanel(currentLevel = getRarityUpgradeLevel()){
+  if (!menuRarityDetailsPanel) return;
+  const activeLevel = Math.min(RARITY_UPGRADE_MAX_LEVEL, Math.max(0, Math.floor(Number(currentLevel) || 0)));
+  const ids = ["common", "uncommon", "rare", "epic", "legendary", "mythical"];
+  const labels = ["C", "U", "R", "E", "L", "M"];
+  const rows = [];
+  for (let lv = 0; lv <= RARITY_UPGRADE_MAX_LEVEL; lv += 1) {
+    const table = getSpecialRarityTableAtLevel(lv);
+    const byId = new Map(table.map((row) => [String(row.id), row]));
+    const activeClass = lv === activeLevel ? " active" : "";
+    rows.push(`
+      <div class="menuRarityDetailRow${activeClass}">
+        <span class="lv">Lv ${lv}</span>
+        ${ids.map((id) => `<span>${formatRarityChance(byId.get(id)?.chance)}</span>`).join("")}
+      </div>
+    `);
+  }
+  menuRarityDetailsPanel.innerHTML = `
+    <div class="menuRarityDetailHead">
+      <span>Level</span>
+      ${labels.map((l) => `<span>${l}</span>`).join("")}
+    </div>
+    ${rows.join("")}
+  `;
+}
+
+function refreshMenuRarityPanel(progress = readMapProgress()){
+  const level = getRarityUpgradeLevel(progress);
+  const nextLevel = Math.min(level + 1, RARITY_UPGRADE_MAX_LEVEL);
+  const table = getSpecialRarityTableAtLevel(level);
+  const nextTable = getSpecialRarityTableAtLevel(nextLevel);
+  const tableById = new Map(table.map((row) => [String(row.id), row]));
+  const nextById = new Map(nextTable.map((row) => [String(row.id), row]));
+  setSpecialRarityUpgradeLevel(level);
+  syncHudRarityLevel(level);
+  refreshMenuTotalStars(progress);
+
+  if (menuRarityPanel) {
+    const rarityRows = menuRarityPanel.querySelectorAll("[data-rarity-id]");
+    for (const rowEl of rarityRows) {
+      const rarityId = String(rowEl.getAttribute("data-rarity-id") || "").trim();
+      if (!rarityId) continue;
+      const pctEl = rowEl.querySelector("[data-rarity-pct]");
+      const deltaEl = rowEl.querySelector("[data-rarity-delta]");
+      if (!pctEl) continue;
+      const row = tableById.get(rarityId);
+      pctEl.textContent = formatRarityChance(row?.chance);
+      if (deltaEl) {
+        const deltaPct = ((nextById.get(rarityId)?.chance ?? 0) - (row?.chance ?? 0)) * 100;
+        deltaEl.textContent = formatRarityDelta(deltaPct);
+        deltaEl.classList.remove("up", "down", "flat");
+        if (Math.abs(deltaPct) < 1e-6) deltaEl.classList.add("flat");
+        else if (deltaPct > 0) deltaEl.classList.add("up");
+        else deltaEl.classList.add("down");
+      }
+    }
+  }
+
+  if (menuRarityUpgradeBtn) {
+    const state = getRarityUpgradeAvailability(progress);
+    if (state.maxed) {
+      menuRarityUpgradeBtn.disabled = true;
+      menuRarityUpgradeBtn.innerHTML = `<span>MAXED</span>`;
+    } else {
+      menuRarityUpgradeBtn.disabled = state.available < (state.cost ?? Infinity);
+      menuRarityUpgradeBtn.innerHTML = `<span>Upgrade</span><span>${state.cost}\u2605</span>`;
+    }
+  }
+  syncRarityUpgradeIntro(progress);
+  syncGameOverUpgradeAvailability(progress);
+  renderMenuRarityDetailsPanel(level);
+}
+
 
 function updateMapProgressMaxWave(mapCardIndex, wave){
   const idx = Math.max(0, Math.min(MAP_CARD_COUNT - 1, Math.floor(Number(mapCardIndex) || 0)));
@@ -366,7 +621,9 @@ function updateMapProgressMaxWave(mapCardIndex, wave){
 }
 
 function normalizeCustomMapName(name){
-  const raw = String(name || "").trim();
+  const raw = String(name || "")
+    .replace(/[\u0000-\u001F\u007F]/g, " ")
+    .trim();
   if (!raw) return "Custom Map";
   return raw.slice(0, 48);
 }
@@ -382,13 +639,13 @@ function normalizeCustomMapsStore(raw){
   const base = createDefaultCustomMapsStore();
   if (!raw || typeof raw !== "object") return base;
   if (Math.floor(Number(raw.schema) || 0) !== CUSTOM_MAPS_SCHEMA) return base;
-  const rows = Array.isArray(raw.maps) ? raw.maps : [];
+  const rows = Array.isArray(raw.maps) ? raw.maps.slice(0, MAX_CUSTOM_MAPS) : [];
   base.maps = rows
     .filter(r => r && typeof r === "object")
     .map(r => ({
-      id: String(r.id || `cm_${Date.now()}_${Math.floor(Math.random() * 10000)}`),
+      id: String(r.id || `cm_${Date.now()}_${Math.floor(Math.random() * 10000)}`).slice(0, MAX_CUSTOM_MAP_ID_LENGTH),
       name: normalizeCustomMapName(r.name),
-      code: String(r.code || ""),
+      code: String(r.code || "").trim().slice(0, MAX_MAP_CODE_LENGTH),
       lastPlayedAt: Math.max(0, Math.floor(Number(r.lastPlayedAt) || 0)),
       createdAt: Math.max(0, Math.floor(Number(r.createdAt) || 0))
     }))
@@ -414,7 +671,7 @@ function writeCustomMapsStore(data){
 
 function upsertPlayedCustomMap({ name, code }){
   const safeName = normalizeCustomMapName(name);
-  const safeCode = String(code || "").trim();
+  const safeCode = String(code || "").trim().slice(0, MAX_MAP_CODE_LENGTH);
   if (!safeCode) return;
   const store = readCustomMapsStore();
   const nowTs = Date.now();
@@ -475,6 +732,7 @@ function bindGameplayEvents(){
   game.onEvent(GAME_EVENTS.GAME_OVER, () => {
     MUSIC.onGameOver();
     MUSIC.setScene("menu");
+    syncGameOverUpgradeAvailability(readMapProgress());
   });
   game.onEvent(GAME_EVENTS.WAVE_STARTED, (payload) => {
     const waveNum = Math.max(1, Math.floor(Number(payload?.waveNum) || 1));
@@ -506,6 +764,7 @@ function handleCampaignClear(payload){
   item.stars.star2 = item.stars.star2 || !!stars.star2;
   item.stars.star3 = item.stars.star3 || !!stars.star3;
   item.stars.star4 = item.stars.star4 || !!stars.star4;
+  item.stars.star5 = item.stars.star5 || !!stars.star5;
   writeMapProgress(progress);
   progressionState = applyCampaignClearToProgression(progressionState, {
     mapIndex: idx,
@@ -514,7 +773,7 @@ function handleCampaignClear(payload){
   });
   writeProgressionState(progressionState);
   syncMenuCodexEntryLocks();
-  refreshMenuTotalStars();
+  refreshMenuRarityPanel(progress);
 }
 
 function isMapUnlocked(mapIndex, progress){
@@ -530,19 +789,32 @@ function escapeHtml(text){
     .replaceAll("'", "&#39;");
 }
 
-function getStarConditionText(starNo){
-  if (starNo === 1) return "Clear wave 100 or higher.";
-  if (starNo === 2) return "Clear wave 100+ without core HP loss.";
-  if (starNo === 3) return "Clear wave 100+ without buying Sniper Tower.";
-  return "Clear wave 100+ while never having 2 towers of the same type.";
+function getMapTargetWave(cardIndex, entry = null){
+  if (Number.isFinite(Number(entry?.targetWave))) {
+    return Math.max(1, Math.floor(Number(entry.targetWave)));
+  }
+  if (typeof CONTENT_REGISTRY?.maps?.getTargetWaveByCardIndex === "function") {
+    return CONTENT_REGISTRY.maps.getTargetWaveByCardIndex(cardIndex);
+  }
+  const idx = Math.max(0, Math.floor(Number(cardIndex) || 0));
+  return Math.max(100, 100 + idx * 5);
 }
 
-function renderStarNode(starClass, lit, starNo){
+function getStarConditionText(starNo, targetWave){
+  const tw = Math.max(1, Math.floor(Number(targetWave) || 100));
+  if (starNo === 1) return `Clear wave ${tw} or higher.`;
+  if (starNo === 2) return `Clear wave ${tw}+ without core HP loss.`;
+  if (starNo === 3) return `Clear wave ${tw}+ without buying Sniper Tower.`;
+  if (starNo === 4) return `Clear wave ${tw}+ while never having 2 towers of the same type.`;
+  return `Clear wave ${tw}+ with No Prestige (no tower reaches level 21).`;
+}
+
+function renderStarNode(starClass, lit, starNo, targetWave){
   const done = lit ? `<span class="mapStarDone">Done</span>` : "";
   return `
     <span class="mapStarWrap ${starClass}">
       <span class="mapStar ${starClass} ${lit ? "lit" : ""}">★</span>
-      <span class="mapStarTip">${escapeHtml(getStarConditionText(starNo))}${done}</span>
+      <span class="mapStarTip">${escapeHtml(getStarConditionText(starNo, targetWave))}${done}</span>
     </span>
   `;
 }
@@ -837,6 +1109,7 @@ function encodeEditorMapCode(){
 function parseMapCode(rawCode){
   const raw = String(rawCode || "").trim();
   if (!raw) throw new Error("Empty map code.");
+  if (raw.length > MAX_MAP_CODE_LENGTH) throw new Error("Map code is too long.");
   let mapName = "Custom Map";
   let dataPart = raw;
 
@@ -856,6 +1129,7 @@ function parseMapCode(rawCode){
 
   const parts = dataPart.split(",").map(p => p.trim()).filter(Boolean);
   if (!parts.length) throw new Error("Invalid map code.");
+  if (parts.length > (MAP_EDITOR_W * MAP_EDITOR_H + 2)) throw new Error("Map code has too many cells.");
 
   const nextGrid = createEmptyEditorGrid();
   let spawn = null;
@@ -939,14 +1213,18 @@ function showMainMenu(){
   hideCustomMaps();
   hideMapEditorPage();
   hideMapSelect();
+  setRarityPreviewVisible(false);
   MUSIC.setScene("menu");
   if (tutorialController) tutorialController.onEnterMainMenu();
-  refreshMenuTotalStars();
+  refreshMenuRarityPanel();
   updateContinueButton();
 }
 
 function hideMainMenu(){
   closeMenuCodexDetail();
+  setRarityPreviewVisible(false);
+  if (menuRarityDetailsPanel) menuRarityDetailsPanel.classList.add("hidden");
+  applyRarityUpgradeLevel();
   setMenuRouteState("game");
   hideCustomMaps();
   hideMapEditorPage();
@@ -971,7 +1249,7 @@ function claimStartGoldReward(){
 
 function getStartGoldRewardText(claimed){
   if (claimed) return `Starting Gold +${START_GOLD_REWARD_BONUS} Permanent • Reward Claimed`;
-  return `You reached the end. Tap to claim your permanent Starting Gold +${START_GOLD_REWARD_BONUS} reward.`;
+  return `Complete the first-map tutorial to unlock Starting Gold +${START_GOLD_REWARD_BONUS}.`;
 }
 
 const MENU_CODEX_DETAIL_DATA = {
@@ -982,11 +1260,11 @@ const MENU_CODEX_DETAIL_DATA = {
     rows: [
       { k: "Auto", v: "Fast single-target physical arrows, reliable for early wave cleanup." },
       { k: "Skill", v: "Loads a stronger follow-up shot to burst priority enemies." },
-      { k: "Prestige", v: "Opens a rapid-volley window so Archers spike together." }
+      { k: "Prestige", v: "For 16.2s, all Archers gain Attack Speed x5.20." }
     ],
     notes: [
-      "Low micro overhead, stable damage profile.",
-      "Works best when focused on consistent lane pressure."
+      `At level ${ARCHER_SPECIALIZATION_LEVEL}, choose your Special Upgrade first. Your free, permanent specialization is then available in the selected tower panel.`,
+      ...Object.values(ARCHER_PATHS).map(path => `${path.name}. ${path.description}`)
     ]
   },
   "tower:mage": {
@@ -996,7 +1274,7 @@ const MENU_CODEX_DETAIL_DATA = {
     rows: [
       { k: "Auto", v: "Casts steady magic bolts early game, then stops basic attacking after Level 21." },
       { k: "Skill", v: "Chain Bolt jumps across nearby enemies for wave control." },
-      { k: "Prestige", v: "Creates a fixed-power mana aura around itself for nearby towers." }
+      { k: "Prestige", v: "For 21.6s, nearby other towers gain Mana x8.80; Mage stops auto-attacking." }
     ],
     notes: [
       "Important: after Level 21, Mage play is skill/aura-driven instead of auto-hit driven.",
@@ -1010,7 +1288,7 @@ const MENU_CODEX_DETAIL_DATA = {
     rows: [
       { k: "Auto", v: "Naturally shreds armor with each hit." },
       { k: "Skill", v: "Shatter blast punishes armored packs and opens burst windows." },
-      { k: "Prestige", v: "Turns pressure into wider cleave-style area control." }
+      { k: "Prestige", v: "For 17.4s, every attack hits all enemies in range for x1.45 damage." }
     ],
     notes: [
       "Primary anti-armor role in most team comps.",
@@ -1024,7 +1302,7 @@ const MENU_CODEX_DETAIL_DATA = {
     rows: [
       { k: "Auto", v: "Applies slow every hit to shape enemy path tempo." },
       { k: "Skill", v: "Frost pulse adds area slow plus magic pressure." },
-      { k: "Prestige", v: "Upgrades control into hard lockdown behavior." }
+      { k: "Prestige", v: "For 18.6s, Frost Pulse roots an unfrozen enemy for 3.0s and applies Frostbite DOT." }
     ],
     notes: [
       "Core crowd-control pick.",
@@ -1038,7 +1316,7 @@ const MENU_CODEX_DETAIL_DATA = {
     rows: [
       { k: "Auto", v: "Each attack applies Poison based on that shot's damage." },
       { k: "Skill", v: "Multiplies current Poison on hit targets; if none exists, applies base Poison." },
-      { k: "Prestige", v: "Spreads plague pressure through clustered enemies." }
+      { k: "Prestige", v: "Bomb and passing projectile multiply existing Poison x3.60 across enemies." }
     ],
     notes: [
       "Excels in sustained fights.",
@@ -1052,7 +1330,7 @@ const MENU_CODEX_DETAIL_DATA = {
     rows: [
       { k: "Auto", v: "Very long-range heavy single shots." },
       { k: "Skill", v: "Overlevel grants permanent secondary growth, now scaling with Magic." },
-      { k: "Prestige", v: "Carepackage grants a massive instant gold spike." }
+      { k: "Prestige", v: "Carepackage pays instant gold based on the current wave: 34 × (80 + 24 × wave)." }
     ],
     notes: [
       "High impact on priority targets.",
@@ -1066,7 +1344,7 @@ const MENU_CODEX_DETAIL_DATA = {
     rows: [
       { k: "Auto", v: "Fires support links that buff allied towers." },
       { k: "Skill", v: "Core uplink supports economy and survivability at wave end." },
-      { k: "Prestige", v: "Pushes another prestige tower forward for team scaling." }
+      { k: "Prestige", v: "Randomly grants +1 level to up to 2 other prestige towers." }
     ],
     notes: [
       "Support identity over direct DPS.",
@@ -1123,7 +1401,7 @@ const MENU_CODEX_DETAIL_DATA = {
       { k: "Counter", v: "Layered control plus coordinated burst windows." }
     ],
     notes: [
-      "Boss fights test comp balance more than raw DPS."
+      `Wave ${FIRST_BOSS_WAVE}: ${FIRST_BOSS_BRIEFING}`
     ]
   },
   "effect:armored": {
@@ -1829,7 +2107,7 @@ function renderMenuPatchNotes(){
       version: "0.2.55",
       notes: [
         "Phase 1 continues: Game-side DOM access is now routed through a dedicated UI adapter module for cleaner boundary separation.",
-        "Speed slider/label syncing and cheat-panel toggle flow were moved behind the adapter, reducing direct document.getElementById usage in gameplay core.",
+        "Speed slider/label syncing and admin-panel visibility flow were moved behind the adapter, reducing direct document.getElementById usage in gameplay core.",
         "This keeps behavior identical while preparing a safer path for deeper UI/gameplay decoupling."
       ]
     },
@@ -1994,7 +2272,7 @@ function renderMenuPatchNotes(){
       version: "0.2.76",
       notes: [
         "Poison prestige projectile update: it no longer disappears at arrival; it keeps traveling and keeps applying pass poison damage/stacks.",
-        "Test speed expanded to 10x (speed cycle + slider + test button).",
+        "Internal tools were expanded with a 10x speed preset for faster balance iteration.",
         "Sniper overlevel gain math was decoupled from primary level to remove low-level overlevel advantage edge cases.",
         "Archer Power Shot magic scaling and Poison skill AD scaling were significantly increased.",
         "Mage selected-panel behavior updated: when prestige is unlocked, Auto Attack and Skill detail hints are hidden.",
@@ -2006,7 +2284,7 @@ function renderMenuPatchNotes(){
     {
       version: "0.2.77",
       notes: [
-        "Public speed controls are now capped at 3x again; 10x is test-only via the cheat panel.",
+        "Public speed controls are now capped at 3x again; 10x is reserved for the internal admin panel.",
         "Sniper secondary level rule simplified: each secondary level now grants flat +1% power (mana-related behavior unchanged).",
         "Peel Tower tuning update: cost increased to 12,500, and support projectile chains now always return to Peel as a final hop without consuming bounce count.",
         "Wave-based poison suppression was removed: poison resist/decay scaling is now disabled to prevent unintended late-wave poison stack drop.",
@@ -2075,7 +2353,7 @@ function renderMenuPatchNotes(){
         "Skill cast floating labels were increased in size for better readability.",
         "Sniper Carepackage payout now also appears in a side neon notice near the tower.",
         "Adaptive boss-music transition no longer hard-resets voices on boss wave start, preventing restart/pause artifacts.",
-        "Cheat/Test panel now includes live formula debug text for Overlevel, Poison multiplier and Carepackage multiplier."
+        "Internal tools panel gained extra live debug readouts for balancing and formula checks."
       ]
     },
     {
@@ -2239,10 +2517,308 @@ function renderMenuPatchNotes(){
         "Boot-recovery safety from previous patch remains active for v0.0.0 freeze cases.",
         "Build/version cache tags bumped for clean deployment pickup."
       ]
+    },
+    {
+      version: "0.4.14",
+      notes: [
+        "Upgrade/Fast-Upgrade hover preview now shows Range gain correctly.",
+        "Crit and Mana Regen hover previews were added so all visible level-scaling stats are shown consistently.",
+        "ArP/MaP remain intentionally hidden from player UI and continue to run only in background calculations."
+      ]
+    },
+    {
+      version: "0.5.0",
+      notes: [
+        "Map challenge system expanded to 5 stars: added No Prestige challenge (no tower reaches level 21).",
+        "Campaign clear/star checks now use map-based Target Wave values instead of a fixed wave 100.",
+        "Map cards now show Target Wave and star tooltips dynamically use each map's target requirement.",
+        "Special Upgrade rarity is now star-upgradable from the main menu with a Fibonacci-like cost curve (0,1,2,3,5...).",
+        "Rarity upgrade shifts chance away from Common and redistributes it proportionally to higher rarities.",
+        "Total Stars was moved into the rarity panel header and now acts as spendable star balance.",
+        "Temporary test grant added: +10 stars bonus for balancing this upgrade system."
+      ]
+    },
+    {
+      version: "0.5.1",
+      notes: [
+        "Map card star layout updated: new 5th challenge star moved to the far left while the large center star stays in the middle.",
+        "Target Wave is now displayed centered above the star row on each map card.",
+        "Rarity panel actions redesigned: new artistic Upgrade button with white readable text, plus compact Details (left) and Reset (right) buttons.",
+        "Upgrade hover now previews next-level rarity chance deltas inline (green increase / red decrease).",
+        "Details panel added: shows rarity probability table for the first 8 upgrade levels.",
+        "Reset rarity action now refunds all spent stars by resetting rarity upgrade level back to 0."
+      ]
+    },
+    {
+      version: "0.5.2",
+      notes: [
+        "Rarity probability values now stay right-aligned on cards and, on Upgrade hover, slide left while delta appears on the right side.",
+        "Upgrade delta preview behavior was refined for cleaner readability (current value + next-level change in one row).",
+        "Rarity upgrade strength is now geometric for testing: each new upgrade level is 2x more impactful than the previous level."
+      ]
+    },
+    {
+      version: "0.5.3",
+      notes: [
+        "Rarity progression fallback reworked for high levels: when Common cannot be reduced enough, remaining pressure now continues from Uncommon, then Rare/Epic/Legendary in sequence.",
+        "After Common depletion, each next donor tier contributes half of the currently remaining pressure, then redistribution continues to higher tiers.",
+        "This keeps late-level rarity upgrades progressing instead of stalling hard at the old Common-only ceiling."
+      ]
+    },
+    {
+      version: "0.5.4",
+      notes: [
+        "Rarity details panel now highlights the player's current rarity level row.",
+        "In-game log header now shows a glowing bold `Rarity Lv. X` label on the top-right side.",
+        "Debug star grant for testing increased to +100 stars.",
+        "Rarity percentage hover presentation refined: current values remain right-aligned, then slide left while delta appears to the right."
+      ]
+    },
+    {
+      version: "0.6.0",
+      notes: [
+        "Debug star grant was removed; star economy is back to normal progression values.",
+        "Campaign maps were expanded from 2 to 10 with new map-code-integrated stages (Elixir, Data Rush 2099, Error 404, Zeracrown, Neurovein, Hex Against Four, Synapse Gate, Neuroloom).",
+        "Map 3 now has dedicated Elixir artwork integrated into map select and in-game background.",
+        "Maps 4+ are flagged as design pending: map cards now render a large `WORK IN PROGRESS` overlay label.",
+        "Map background loading no longer falls back to Map 1 art when a map has no assigned background image."
+      ]
+    },
+    {
+      version: "0.6.1",
+      notes: [
+        "Rarity upgrade donor carry now loses half of its remaining force on every tier transition, even when an intermediate donor tier is already empty.",
+        "This softens late rarity-upgrade spikes so endgame levels do not jump as aggressively once Common and Uncommon are depleted.",
+        "Work-in-progress map cards now keep their overlay label above neighboring cards consistently.",
+        "WIP stages also show a centered top-of-map `WORK IN PROGRESS` banner during gameplay."
+      ]
+    },
+    {
+      version: "0.6.2",
+      notes: [
+        "Settings now include a login-gated tools card in the bottom-right corner.",
+        "Admin login can now adjust total star balance and toggle the in-game admin panel directly from Settings.",
+        "The in-game admin panel was cleaned up: Legendary and 10x Speed now share one row, and the extra formula readout was removed.",
+        "Log entries no longer act as hidden admin toggles."
+      ]
+    },
+    {
+      version: "0.6.3",
+      notes: [
+        "Test tools improved."
+      ]
+    },
+    {
+      version: "0.6.4",
+      notes: [
+        "Rarity Upgrade now has a hard cap at Level 8, with the Upgrade button showing `MAXED` at cap.",
+        "Rarity Upgrade cost sequence was updated to start at 1 and continue with Fibonacci progression.",
+        "Game Over modal now shows `Upgrade available in Main Menu` and highlights Main Menu when a rarity upgrade can be purchased.",
+        "First-time rarity-upgrade onboarding was added: eligible players see a highlighted rarity panel with an upgrade guidance card."
+      ]
+    },
+    {
+      version: "0.6.5",
+      notes: [
+        "All random `Tip:` lines were removed from the in-game log."
+      ]
+    },
+    {
+      version: "0.6.6",
+      notes: [
+        "Xeno map background scale increased by +5% so the updated artwork fits the battlefield framing better."
+      ]
+    },
+    {
+      version: "0.6.7",
+      notes: [
+        "Xeno map background was shifted 0.7% to the left and stretched 2.2% vertically to better fit composition."
+      ]
+    },
+    {
+      version: "0.6.8",
+      notes: [
+        "Xeno map background was shifted upward to 1.11% vertical offset for finer framing."
+      ]
+    },
+    {
+      version: "0.6.9",
+      notes: [
+        "Xeno map background was shifted 0.75% further up and increased 0.5% in vertical zoom."
+      ]
+    },
+    {
+      version: "0.6.10",
+      notes: [
+        "Phase 4 performance pass: static map layers are cached by map and scale, avoiding full grid redraws every frame.",
+        "Selected HUD panels now rebuild only when their displayed state changes; tutorial step definitions and geometry are cached between meaningful layout changes.",
+        "Transient visual budgets cap floating text and visual effect lines; the Settings menu now exposes a persistent Reduced Effects option without changing combat simulation.",
+        "Breaker cleave, Mage chain follow-up and Peel first-hop targeting now reuse spatial index range queries; the performance sampler now reports p95/p99 frame times.",
+        "Continue snapshots now preserve the simulation clock so clear-time reporting does not reset after loading a run."
+      ]
+    },
+    {
+      version: "0.6.11",
+      notes: [
+        "A lightweight FPS counter is now visible during gameplay and hidden on the main menu.",
+        "The counter uses real elapsed render time; detailed p95/p99 frame timing remains opt-in through the performance sampler."
+      ]
+    },
+    {
+      version: "0.6.12",
+      notes: [
+        "The lightweight FPS counter now remains visible on both the main menu and during gameplay."
+      ]
+    },
+    {
+      version: "0.6.13",
+      notes: [
+        "Prestige descriptions now show their real duration, multiplier and target behavior in the selected-tower panel and main-menu Codex.",
+        "Archer, Mage, Breaker, Blizzard, Poison, Sniper and Peel text now derives from or matches the active gameplay rules."
+      ]
+    },
+    {
+      version: "0.6.14",
+      notes: [
+        "The Level 8 rarity upgrade is now reachable: the eight upgrade costs total exactly 50 stars, matching the campaign's maximum reward."
+      ]
+    },
+    {
+      version: "0.6.15",
+      notes: [
+        "The first-map tutorial now uses three focused steps: place Archer, start the wave, then upgrade Archer.",
+        "Detailed stat, enemy and ability explanations remain optional in the selected panel and Codex; campaign maps 2+ and custom maps no longer run the tutorial."
+      ]
+    },
+    {
+      version: "0.6.16",
+      notes: [
+        "Endless wave pressure no longer drops sharply from wave 105 to 106 when the enemy cap begins to grow.",
+        "Overflow pressure now uses each wave's active enemy cap, keeping the late-game transition continuous."
+      ]
+    },
+    {
+      version: "0.6.17",
+      notes: [
+        "Mage Level 20 now clearly previews its Prestige tradeoff before purchase: it permanently stops auto-attacks and unlocks a Mana aura.",
+        "The final Mage upgrade button is labeled Prestige so the role conversion is not mistaken for an ordinary stat upgrade."
+      ]
+    },
+    {
+      version: "0.6.18",
+      notes: [
+        "Campaign balancing now records a baseline for every map: route length, buildable tiles, obstacles and target wave.",
+        "This makes future map difficulty tuning measurable instead of relying only on target-wave numbers."
+      ]
+    },
+    {
+      version: "0.6.19",
+      notes: [
+        "Map balance baselines now include the best base-range route coverage for every tower on every campaign map.",
+        "Route exposure can now be compared alongside build space and target waves before map difficulty is tuned."
+      ]
+    },
+    {
+      version: "0.6.20",
+      notes: [
+        "Every map baseline now includes deterministic target-wave HP and Gold budgets with random affixes excluded.",
+        "Map exposure, build space and wave pressure can now be reviewed together before balance values change."
+      ]
+    },
+    {
+      version: "0.6.21",
+      notes: [
+        "The main menu no longer runs tower and enemy simulation work while its overlay is open, reducing idle CPU load and improving menu FPS."
+      ]
+    },
+    {
+      version: "0.6.22",
+      notes: [
+        "First targeting now re-evaluates the furthest enemy on every attack instead of silently locking the previous target."
+      ]
+    },
+    {
+      version: "0.6.23",
+      notes: [
+        "Starting Gold +30 is now unlocked by completing the first-map tutorial instead of clicking patch notes."
+      ]
+    },
+    {
+      version: "0.6.24",
+      notes: [
+        "Damage reporting now separates real HP loss from overkill and records support buff uptime and Carepackage gold.",
+        "Gameplay randomness now uses a seeded stream carried through run saves and can be replayed with a chosen seed."
+      ]
+    },
+    {
+      version: "0.6.25",
+      notes: [
+        "Tutorial scripted Special Upgrade rarity is now limited to the first Archer milestone; all later Special Upgrades use the normal Star-influenced rarity RNG."
+      ]
+    },
+    {
+      version: "0.6.26",
+      notes: [
+        "Menu pages no longer apply a full-screen blur/transform to the hidden battlefield and the covered canvas skips redraws while menus are open.",
+        "Settings login/admin controls were removed; the dev panel remains available only through the explicit devtools query flag."
+      ]
+    },
+    {
+      version: "0.6.27",
+      notes: [
+        "Canvas layout measurement now runs only on resize or map-dimension changes instead of forcing a DOM layout read every render frame."
+      ]
+    },
+    {
+      version: "0.6.28",
+      notes: [
+        "Performance sampling now reports true render-frame pacing for frame/p95/p99, with JavaScript callback cost shown separately as js.",
+        "Screen shake uses visual-only randomness so render FPS no longer advances seeded combat RNG.",
+        "The scripted first Archer Special Upgrade runs only while the Map 1 Tutorial setting is enabled; all other choices keep normal Star-influenced rarity RNG.",
+        "Reduced Effects now shows when the operating system's reduced-motion preference enables it, and visual-only rings are budgeted without changing combat effects."
+      ]
+    },
+    {
+      version: "0.6.29",
+      notes: [
+        "Gameplay readability pass: entrance/core markers, selected-tower targeting assist, core-threat telegraph and richer enemy HP/boss presentation were added.",
+        "The new battlefield visuals respect Reduced Effects and do not modify combat values or targeting rules."
+      ]
+    },
+    {
+      version: "0.6.30",
+      notes: [
+        "Tower shots now have directional, tower-colored muzzle flashes; critical hits receive a stronger visual cue without changing their damage calculation.",
+        "Runner, Tank, Siphon and Boss silhouettes were differentiated further. Poison now shows stacks plus effective damage per second in one compact badge.",
+        "Floating damage text has an impact animation and clearer critical-hit treatment; all additions are render-only and honor Reduced Effects."
+      ]
+    },
+    {
+      version: "0.6.31",
+      notes: [
+        "The wave panel shows incoming groups in spawn order, including counts and wave-wide resistance.",
+        "On Neo City, tanks lead wave 6. In wave 8, two groups of runners flank the tank column in the spawn queue.",
+        "Calling waves early stops at each campaign map's final wave. Choose Endless after clearing it to continue."
+      ]
+    },
+    {
+      version: "0.6.32",
+      notes: [
+        "At level 5, each Archer can choose Piercing Shot or Focused Fire in its tower panel. This choice is separate from its Special Upgrade roll."
+      ]
+    },
+    {
+      version: "0.6.33",
+      notes: [
+        "Wave 10 previews the first boss’s repeating Cleanse and Summon cycle. Its Exposed window is marked on the boss and timed in the wave panel.",
+        "Archer’s level 5 upgrade explains when to specialize. Focused Fire now shows a shot-damage example in the picker and Codex."
+      ]
     }
   ];
   const orderedPatchHistory = [...patchHistory].reverse();
   const rewardClaimed = hasStartGoldRewardClaimed();
+  const tutorialSteps = Array.isArray(settings?.tutorial?.completedStepIds) ? settings.tutorial.completedStepIds : [];
+  const tutorialComplete = TUTORIAL_STEP_ORDER.every(id => tutorialSteps.includes(id));
   menuPatchNotes.innerHTML = `
     <div class="menuPatchNotesTitle">Patch Notes <span class="menuPatchNotesArrow">▼</span></div>
     <div class="menuPatchNotesMore">
@@ -2255,7 +2831,7 @@ function renderMenuPatchNotes(){
           type="button"
           class="menuPatchRewardBtn${rewardClaimed ? " claimed" : ""}"
           data-start-gold-reward="1"
-          ${rewardClaimed ? "disabled" : ""}
+          ${(rewardClaimed || !tutorialComplete) ? "disabled" : ""}
         >${escapeHtml(getStartGoldRewardText(rewardClaimed))}</button>
       </div>
     </div>
@@ -2265,7 +2841,7 @@ function renderMenuPatchNotes(){
     rewardBtn.addEventListener("click", (ev) => {
       ev.preventDefault();
       ev.stopPropagation();
-      if (hasStartGoldRewardClaimed()) return;
+      if (hasStartGoldRewardClaimed() || !tutorialComplete) return;
       claimStartGoldReward();
       rewardBtn.disabled = true;
       rewardBtn.classList.add("claimed");
@@ -2357,10 +2933,12 @@ function renderMapSelect(){
     const idx = start + localIdx;
     const unlocked = isMapUnlocked(idx, progress);
     const cardProgress = progress.maps[idx];
+    const targetWave = getMapTargetWave(idx, entry);
     const star1 = !!cardProgress?.stars?.star1;
     const star2 = !!cardProgress?.stars?.star2;
     const star3 = !!cardProgress?.stars?.star3;
     const star4 = !!cardProgress?.stars?.star4;
+    const star5 = !!cardProgress?.stars?.star5;
     const maxWave = Math.max(0, Math.floor(Number(cardProgress?.maxWave) || 0));
     const playable = !!entry.playable && unlocked;
     const lockText = unlocked
@@ -2369,16 +2947,22 @@ function renderMapSelect(){
     const bgStyle = entry.image
       ? `style="background-image:url('${escapeHtml(entry.image)}')"`
       : "";
+    const wipBadge = entry.wip
+      ? `<div class="mapCardWip">WORK IN PROGRESS</div>`
+      : "";
     return `
-      <button class="mapCard ${playable ? "playable" : "locked"}" type="button" data-map-card="${idx}">
+      <button class="mapCard ${playable ? "playable" : "locked"} ${entry.wip ? "wipCard" : ""}" type="button" data-map-card="${idx}">
         <div class="mapCardImage" ${bgStyle}></div>
         <div class="mapCardShade"></div>
+        ${wipBadge}
         <div class="mapCardName">${escapeHtml(entry.title)}</div>
+        <div class="mapCardTarget">Target Wave: ${targetWave}</div>
         <div class="mapCardStars">
-          ${renderStarNode("star2", star2, 2)}
-          ${renderStarNode("star1", star1, 1)}
-          ${renderStarNode("star3", star3, 3)}
-          ${renderStarNode("star4", star4, 4)}
+          ${renderStarNode("star5", star5, 5, targetWave)}
+          ${renderStarNode("star2", star2, 2, targetWave)}
+          ${renderStarNode("star1", star1, 1, targetWave)}
+          ${renderStarNode("star3", star3, 3, targetWave)}
+          ${renderStarNode("star4", star4, 4, targetWave)}
         </div>
         <div class="mapCardStats">Max Wave: ${maxWave}</div>
         <div class="mapCardLock">${escapeHtml(lockText)}</div>
@@ -2398,12 +2982,18 @@ function renderMapSelect(){
 }
 
 function readRunSave(){
-  try {
-    const raw = localStorage.getItem(RUN_SAVE_KEY);
+  const parse = (raw) => {
     if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return null;
-    return parsed;
+    try {
+      const parsed = JSON.parse(raw);
+      return (parsed && typeof parsed === "object") ? parsed : null;
+    } catch (_) {
+      return null;
+    }
+  };
+  try {
+    return parse(localStorage.getItem(RUN_SAVE_KEY))
+      || parse(localStorage.getItem(RUN_SAVE_BACKUP_KEY));
   } catch (_) {
     return null;
   }
@@ -2411,13 +3001,24 @@ function readRunSave(){
 
 function writeRunSave(data){
   try {
-    localStorage.setItem(RUN_SAVE_KEY, JSON.stringify(data));
+    const serialized = JSON.stringify(data);
+    const current = localStorage.getItem(RUN_SAVE_KEY);
+    if (current) {
+      try {
+        const parsed = JSON.parse(current);
+        if (parsed && typeof parsed === "object") {
+          localStorage.setItem(RUN_SAVE_BACKUP_KEY, current);
+        }
+      } catch (_) {}
+    }
+    localStorage.setItem(RUN_SAVE_KEY, serialized);
   } catch (_) {}
 }
 
 function clearRunSave(){
   try {
     localStorage.removeItem(RUN_SAVE_KEY);
+    localStorage.removeItem(RUN_SAVE_BACKUP_KEY);
   } catch (_) {}
 }
 
@@ -2546,6 +3147,61 @@ function bindMainMenu(){
 
   if (menuSettingsBtn) menuSettingsBtn.onclick = () => openSettings();
   if (menuStatsBtn) menuStatsBtn.onclick = () => openStatistics();
+  if (menuRarityDetailsBtn && menuRarityDetailsPanel) {
+    menuRarityDetailsBtn.onclick = (ev) => {
+      ev.preventDefault();
+      menuRarityDetailsPanel.classList.toggle("hidden");
+      if (!menuRarityDetailsPanel.classList.contains("hidden")) {
+        renderMenuRarityDetailsPanel(getRarityUpgradeLevel(readMapProgress()));
+      }
+    };
+  }
+  if (menuRarityResetBtn) {
+    menuRarityResetBtn.onclick = (ev) => {
+      ev.preventDefault();
+      openConfirm(
+        "Reset Rarity Upgrades?",
+        "This will reset rarity upgrade level to 0 and refund all spent stars.",
+        "Reset",
+        () => {
+          const progress = readMapProgress();
+          const prevLevel = getRarityUpgradeLevel(progress);
+          if (prevLevel <= 0) {
+            refreshMenuRarityPanel(progress);
+            return;
+          }
+          progress.rarityUpgradeLevel = 0;
+          writeMapProgress(progress);
+          refreshMenuRarityPanel(progress);
+          if (typeof game?.logEvent === "function") {
+            game.logEvent(`Rarity upgrades reset: Lv ${prevLevel} -> Lv 0 (stars refunded).`);
+          }
+        }
+      );
+    };
+  }
+  if (menuRarityUpgradeBtn) {
+    menuRarityUpgradeBtn.addEventListener("pointerenter", () => setRarityPreviewVisible(true));
+    menuRarityUpgradeBtn.addEventListener("pointerleave", () => setRarityPreviewVisible(false));
+    menuRarityUpgradeBtn.addEventListener("focus", () => setRarityPreviewVisible(true));
+    menuRarityUpgradeBtn.addEventListener("blur", () => setRarityPreviewVisible(false));
+    menuRarityUpgradeBtn.onclick = (ev) => {
+      ev.preventDefault();
+      const progress = readMapProgress();
+      const level = getRarityUpgradeLevel(progress);
+      if (level >= RARITY_UPGRADE_MAX_LEVEL) return;
+      const cost = getRarityUpgradeCostForLevel(level);
+      const available = getAvailableStars(progress);
+      if (available < cost) return;
+      progress.rarityUpgradeLevel = Math.min(RARITY_UPGRADE_MAX_LEVEL, level + 1);
+      progress.rarityIntroSeen = true;
+      writeMapProgress(progress);
+      refreshMenuRarityPanel(progress);
+      if (typeof game?.logEvent === "function") {
+        game.logEvent(`Rarity upgrade purchased: Lv ${level} -> Lv ${level + 1} (-${cost}★).`);
+      }
+    };
+  }
 
   if (fullscreenHintBtn) {
     fullscreenHintBtn.onclick = () => {
@@ -2919,6 +3575,15 @@ function bindSettingsModal(){
     };
   }
 
+  if (settingsLowEffectsToggleBtn) {
+    settingsLowEffectsToggleBtn.onclick = () => {
+      const graphics = ensureGraphicsSettings();
+      graphics.lowEffects = !graphics.lowEffects;
+      persistSettings(false);
+      applyVisualSettings();
+    };
+  }
+
   if (settingsTutorialResetBtn) {
     settingsTutorialResetBtn.onclick = () => {
       if (!isMainMenuOpen()) return;
@@ -2934,9 +3599,11 @@ function bindSettingsModal(){
       renderKeybindRows();
     };
   }
+
 }
 
 function syncSettingsUI(){
+  applyVisualSettings();
   if (!settings.tutorial || typeof settings.tutorial !== "object") {
     settings.tutorial = { enabled: true, completedStepIds: [] };
   }
@@ -2949,7 +3616,9 @@ function syncSettingsUI(){
   if (settingsMusicVolumeValue) settingsMusicVolumeValue.textContent = `${musicVolPct}%`;
   if (settingsMusicMuteBtn) settingsMusicMuteBtn.textContent = settings.audio.musicMuted ? "Music Unmute" : "Music Mute";
   if (settingsTutorialToggleBtn) settingsTutorialToggleBtn.textContent = settings.tutorial.enabled === false ? "Tutorial OFF" : "Tutorial ON";
-  const completedTutorialSteps = Array.isArray(settings.tutorial.completedStepIds) ? settings.tutorial.completedStepIds.length : 0;
+  const completedTutorialSteps = Array.isArray(settings.tutorial.completedStepIds)
+    ? settings.tutorial.completedStepIds.filter(stepId => TUTORIAL_STEP_ORDER.includes(stepId)).length
+    : 0;
   if (settingsTutorialProgress) settingsTutorialProgress.textContent = `Completed: ${completedTutorialSteps}/${TUTORIAL_STEP_ORDER.length}`;
   const canResetTutorial = completedTutorialSteps > 0 && isMainMenuOpen();
   if (settingsTutorialResetBtn) {
@@ -2958,6 +3627,7 @@ function syncSettingsUI(){
       ? ""
       : "Tutorial reset is available only in Main Menu settings.";
   }
+  syncInGameAdminPanel();
 }
 
 function openSettings(){
@@ -3084,12 +3754,13 @@ function bindStatsModal(){
           if (typeof game.hardResetPersistentStats === "function") {
             game.hardResetPersistentStats();
           }
-          writeMapProgress(createDefaultMapProgress());
+          const resetProgress = createDefaultMapProgress();
+          writeMapProgress(resetProgress);
           progressionState = createDefaultProgressionState();
           writeProgressionState(progressionState);
           clearRunSave();
           updateContinueButton();
-          refreshMenuTotalStars();
+          refreshMenuRarityPanel(resetProgress);
           renderMapSelect();
           syncMenuCodexEntryLocks();
           openStatistics();

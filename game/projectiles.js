@@ -1,5 +1,5 @@
 import { CFG } from "./config.js";
-import { clamp, dist2 } from "./utils.js";
+import { clamp, dist2, random } from "./utils.js";
 
 const FLOATING_TEXT_POOL_LIMIT = 512;
 const EFFECT_LINE_POOL_LIMIT = 512;
@@ -36,7 +36,7 @@ class FloatingText {
       this.dead=false;
 
       const safeLife = Math.max(0.0001, life || CFG.FLOAT_TEXT_LIFE || 1);
-      const jitterX = (Math.random()*2-1) * CFG.FLOAT_TEXT_SPREAD;
+      const jitterX = (random()*2-1) * CFG.FLOAT_TEXT_SPREAD;
       this.vx = jitterX;
       this.vy = -CFG.FLOAT_TEXT_RISE / safeLife;
       return this;
@@ -244,15 +244,17 @@ class EffectLine {
     }
 
     applyHitTarget(target, game){
+      const multiplier = this.payload.hitMultiplier?.(target) ?? 1;
       const dealt = target.takeDamage(
-        this.payload.physRaw,
-        this.payload.magicRaw,
+        this.payload.physRaw * multiplier,
+        this.payload.magicRaw * multiplier,
         this.payload.armorPenPct,
         this.payload.magicPenFlat,
         this.sourceTower,
         true,
         false,
-        this.payload.floatColor || null
+        this.payload.floatColor || null,
+        this.payload.isCrit
       );
 
       if(this.sourceTower){
@@ -371,6 +373,7 @@ class EffectLine {
       this._onPass = options.onPass ?? null;
       this._passRadius = options.passRadiusTiles ?? 0;
       this._passRepeatSec = Math.max(0, options.passRepeatSec ?? 0);
+      this._passElapsed = 0;
       this._passHitSet.clear();
       this._passLastHit.clear();
       this._enemyRangeScratch.length = 0;
@@ -387,7 +390,7 @@ class EffectLine {
         const ny = dx / len;
         const sign = (options.curveSign === -1 || options.curveSign === 1)
           ? options.curveSign
-          : (Math.random() < 0.5 ? -1 : 1);
+          : (random() < 0.5 ? -1 : 1);
         const arcMul = Math.max(0, options.curveArcMul ?? 0.30);
         const arcMax = Math.max(0.10, options.curveArcMaxTiles ?? 1.35);
         const arc = Math.min(arcMax, len * arcMul) * sign;
@@ -442,10 +445,12 @@ class EffectLine {
       this._dirY = edy / el;
     }
 
-    applyPassEffects(game){
+    applyPassEffects(game, simTime = null){
       if (!this._onPass || this._passRadius <= 0) return;
       const rr2 = this._passRadius * this._passRadius;
-      const nowSec = performance.now() / 1000;
+      const nowSec = Number.isFinite(simTime)
+        ? simTime
+        : (Number.isFinite(game?.simTime) ? game.simTime : this._passElapsed);
       const nearby = (typeof game.getEnemiesInRange === "function")
         ? game.getEnemiesInRange(this.x, this.y, this._passRadius, this._enemyRangeScratch)
         : game.enemies;
@@ -458,9 +463,19 @@ class EffectLine {
             this._onPass(e, game, this);
           } else {
             const prev = this._passLastHit.get(e) ?? -Infinity;
-            if ((nowSec - prev) < this._passRepeatSec) continue;
-            this._passLastHit.set(e, nowSec);
-            this._onPass(e, game, this);
+            if (!Number.isFinite(prev)) {
+              this._passLastHit.set(e, nowSec);
+              this._onPass(e, game, this);
+              continue;
+            }
+            // Consume every interval crossed by this simulation step. This
+            // keeps repeat effects invariant when a frame/update is delayed.
+            let next = prev + this._passRepeatSec;
+            while (next <= nowSec + 1e-9) {
+              this._passLastHit.set(e, next);
+              this._onPass(e, game, this);
+              next += this._passRepeatSec;
+            }
           }
         }
       }
@@ -468,6 +483,7 @@ class EffectLine {
 
     update(dt, game){
       if(this.dead) return;
+      this._passElapsed += dt;
 
       if(!this._arrived){
         const step = this.speed * dt;
@@ -502,7 +518,7 @@ class EffectLine {
           this._lastMoveDY = my;
         }
 
-        this.applyPassEffects(game);
+        this.applyPassEffects(game, game?.simTime);
         return;
       }
 
@@ -512,7 +528,7 @@ class EffectLine {
       this.y += my;
       this._lastMoveDX = mx;
       this._lastMoveDY = my;
-      this.applyPassEffects(game);
+      this.applyPassEffects(game, game?.simTime);
       const margin=1.0;
       if(this.x < -margin || this.y < -margin || this.x > game.map.w+margin || this.y > game.map.h+margin){
         this.dead=true;
@@ -609,6 +625,7 @@ function releaseFreeProjectile(item){
   item._curveT = 0;
   item._passHitSet.clear();
   item._passLastHit.clear();
+  item._passElapsed = 0;
   item._enemyRangeScratch.length = 0;
   pushToPool(freeProjectilePool, item, FREE_PROJECTILE_POOL_LIMIT);
 }

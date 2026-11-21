@@ -39,6 +39,9 @@ const DEFAULT_SETTINGS = {
   tutorial: {
     enabled: true,
     completedStepIds: []
+  },
+  graphics: {
+    lowEffects: false
   }
 };
 
@@ -92,12 +95,20 @@ function normalizeTutorial(input){
   };
 }
 
+function normalizeGraphics(input){
+  const raw = input && typeof input === "object" ? input : {};
+  return {
+    lowEffects: !!raw.lowEffects
+  };
+}
+
 function normalizeSettings(input){
   const raw = input && typeof input === "object" ? input : {};
   const normalized = {
     keybinds: normalizeKeybinds(raw.keybinds),
     audio: normalizeAudio(raw.audio),
-    tutorial: normalizeTutorial(raw.tutorial)
+    tutorial: normalizeTutorial(raw.tutorial),
+    graphics: normalizeGraphics(raw.graphics)
   };
   return normalized;
 }

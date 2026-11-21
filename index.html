@@ -10,17 +10,47 @@
 <body class="mainMenuOpen">
 <div id="mainMenuOverlay" class="mainMenuOverlay">
   <div class="mainMenuBackdrop" aria-hidden="true"></div>
-  <div id="menuTotalStars" class="mainMenuStars mono">Total Stars: 0</div>
   <aside id="menuRarityPanel" class="menuSidePanel menuSideLeft">
-    <h3>Special Upgrade Rarity</h3>
-    <div class="menuRarityList">
-      <div class="menuRarityCard rarity-common"><span>Common</span><span>49.9%</span></div>
-      <div class="menuRarityCard rarity-uncommon"><span>Uncommon</span><span>30.0%</span></div>
-      <div class="menuRarityCard rarity-rare"><span>Rare</span><span>13.0%</span></div>
-      <div class="menuRarityCard rarity-epic"><span>Epic</span><span>6.0%</span></div>
-      <div class="menuRarityCard rarity-legendary"><span>Legendary</span><span>1.0%</span></div>
-      <div class="menuRarityCard rarity-mythical"><span>Mythical Story</span><span>0.1%</span></div>
+    <div class="menuRarityHead">
+      <h3>Special Upgrade Rarity</h3>
+      <div id="menuTotalStars" class="mainMenuStars mono">Total Stars: 0</div>
     </div>
+    <div class="menuRarityList">
+      <div class="menuRarityCard rarity-common" data-rarity-id="common">
+        <span>Common</span>
+        <span class="menuRarityPctWrap"><span data-rarity-pct>49.9%</span><span class="menuRarityDelta" data-rarity-delta></span></span>
+      </div>
+      <div class="menuRarityCard rarity-uncommon" data-rarity-id="uncommon">
+        <span>Uncommon</span>
+        <span class="menuRarityPctWrap"><span data-rarity-pct>30.0%</span><span class="menuRarityDelta" data-rarity-delta></span></span>
+      </div>
+      <div class="menuRarityCard rarity-rare" data-rarity-id="rare">
+        <span>Rare</span>
+        <span class="menuRarityPctWrap"><span data-rarity-pct>13.0%</span><span class="menuRarityDelta" data-rarity-delta></span></span>
+      </div>
+      <div class="menuRarityCard rarity-epic" data-rarity-id="epic">
+        <span>Epic</span>
+        <span class="menuRarityPctWrap"><span data-rarity-pct>6.0%</span><span class="menuRarityDelta" data-rarity-delta></span></span>
+      </div>
+      <div class="menuRarityCard rarity-legendary" data-rarity-id="legendary">
+        <span>Legendary</span>
+        <span class="menuRarityPctWrap"><span data-rarity-pct>1.0%</span><span class="menuRarityDelta" data-rarity-delta></span></span>
+      </div>
+      <div class="menuRarityCard rarity-mythical" data-rarity-id="mythical">
+        <span>Mythical Story</span>
+        <span class="menuRarityPctWrap"><span data-rarity-pct>0.1%</span><span class="menuRarityDelta" data-rarity-delta></span></span>
+      </div>
+    </div>
+    <div class="menuRarityActions">
+      <button id="menuRarityDetailsBtn" class="menuRarityMiniBtn details" type="button">Details</button>
+      <button id="menuRarityUpgradeBtn" class="menuRarityUpgradeBtn" type="button"><span>Upgrade</span><span>0★</span></button>
+      <button id="menuRarityResetBtn" class="menuRarityMiniBtn reset" type="button">Reset</button>
+    </div>
+    <div id="menuRarityIntroCallout" class="menuRarityIntroCallout hidden">
+      <div class="menuRarityIntroTitle">Upgrade Available</div>
+      <div class="menuRarityIntroText">Spend stars to improve rarity odds for Special Upgrades. Click Upgrade to continue.</div>
+    </div>
+    <div id="menuRarityDetailsPanel" class="menuRarityDetailsPanel hidden"></div>
   </aside>
 
   <aside id="menuCodexPanel" class="menuSidePanel menuSideRight">
@@ -203,6 +233,9 @@
       <div class="sideHud">
         <div id="hudSelected" class="hudBlock">
           <h3>Selected</h3>
+          <fieldset id="archerPathPicker" hidden>
+            <legend>Choose a permanent Archer specialization</legend>
+          </fieldset>
           <div id="selectedInfoHud" class="small">—</div>
 
           <div class="selBtns">
@@ -217,12 +250,16 @@
         </div>
 
         <div id="hudLog" class="hudBlock hudLog">
-          <div id="hudLogTitle" class="hudLogTitle">Log</div>
+          <div class="hudLogTitle">
+            <span id="hudLogTitleText">Log</span>
+            <span id="hudLogRarityLv" class="hudLogRarityLv">RARITY LV. 0</span>
+          </div>
           <div id="logLines" class="hudLogBody"></div>
         </div>
       </div>
 
       <div class="canvasWrap">
+        <div id="mapWipBanner" class="mapWipBanner hidden">WORK IN PROGRESS</div>
         <canvas id="c"></canvas>
       </div>
     </div>
@@ -245,7 +282,9 @@
 
     <div class="shopSpeedGroup">
       <div class="panelSection wavePanel">
-        <h2>Wave</h2>
+        <h2 id="waveForecastTitle">Wave</h2>
+        <p id="waveForecastOrder" class="waveForecast" hidden></p>
+        <p id="waveBossIntel" class="waveForecast" hidden></p>
         <div class="btnRow">
           <button id="startWaveBtn">Start</button>
           <button id="nextWaveNowBtn">Next Wave Now</button>
@@ -260,22 +299,19 @@
       </div>
 
       <div id="cheatPanel" class="panelSection cheatPanel hidden">
-        <h2>Test</h2>
+        <h2>Admin</h2>
         <div class="btnRow">
           <button id="cheatGoldBtn">+1.000.000 Gold</button>
           <button id="cheatHpBtn">+1.000 Core</button>
         </div>
         <div class="btnRow">
           <button id="cheatLegendaryBtn" class="legendaryBtn">Legendary</button>
+          <button id="cheatSpeed10Btn">10x Speed</button>
         </div>
         <div class="btnRow cheatWaveRow">
           <input id="cheatWaveInput" type="number" min="1" step="1" value="1" />
           <button id="cheatWaveGoBtn">Wave</button>
         </div>
-        <div class="btnRow">
-          <button id="cheatSpeed10Btn">10x Speed</button>
-        </div>
-        <div id="cheatFormulaDebug" class="small cheatFormulaDebug">Overlevel +0.00% • Poison x1.20 • Carepackage x34</div>
       </div>
 
       <div class="panelSection speedPanel">
@@ -338,6 +374,7 @@
       <button id="gameOverInspectBtn">Inspect Map</button>
       <button id="gameOverMainMenuBtn">Main Menu</button>
     </div>
+    <div id="gameOverUpgradeHint" class="sub gameOverUpgradeHint hidden">Upgrade available in Main Menu</div>
   </div>
 </div>
 
@@ -388,6 +425,18 @@
           <div class="small">Only unfinished tutorial steps are shown in future runs.</div>
         </div>
       </div>
+
+      <div class="settingsCard">
+        <h4>Visuals</h4>
+        <div class="settingsTutorialBody">
+          <div class="settingsRow">
+            <span>Reduced Effects</span>
+            <button id="settingsLowEffectsToggleBtn" class="settingsSmallBtn" type="button" aria-pressed="false">Reduced Effects OFF</button>
+          </div>
+          <div class="small">Reduces transient visual effects while keeping combat behavior unchanged.</div>
+        </div>
+      </div>
+
     </div>
     <div class="winActions">
       <button id="settingsCloseBtn" class="good">Close</button>
@@ -432,24 +481,17 @@
   </div>
 </div>
 
-<div id="perfHud" class="perfHud"></div>
+<div id="perfHud" class="perfHud" aria-live="polite">FPS: --</div>
 
 <script>
   window.__armtdBoot = window.__armtdBoot || { ok: false, startedAt: Date.now() };
 </script>
 <!-- Entry point (Live Server: open this index.html) -->
-<script type="module" src="game/main.js?v=0.4.13"></script>
+<script type="module" src="game/main.js?v=0.6.33"></script>
 <script>
   (() => {
     const RETRY_KEY = "armtd_boot_retry_v1";
     const RECOVER_KEY = "armtd_boot_recover_v1";
-    const RECOVER_CLEAR_KEYS = [
-      "armtd_run_save_v1",
-      "armtd_map_progress_v1",
-      "armtd_progression_v1",
-      "armtd_stats_lifetime_v1",
-      "td_highkills_v2"
-    ];
     const watchdogMs = 4200;
     setTimeout(() => {
       if (window.__armtdBoot?.ok) {
@@ -475,16 +517,10 @@
         } catch (_) {}
       }
       if (!recovered) {
-        try {
-          for (const key of RECOVER_CLEAR_KEYS) localStorage.removeItem(key);
-        } catch (_) {}
         try { sessionStorage.setItem(RECOVER_KEY, "1"); } catch (_) {}
-        try {
-          const u = new URL(window.location.href);
-          u.searchParams.set("bootRecover", String(Date.now()));
-          window.location.replace(u.toString());
-          return;
-        } catch (_) {}
+        // A slow module load is not evidence of corrupt data. Keep all saves
+        // intact and expose a console warning instead of clearing storage.
+        console.error("ARMTD is still loading; saved data was kept intact.");
       }
       const v = document.getElementById("menuVersionLabel");
       if (v && String(v.textContent || "").trim() === "v0.0.0") {

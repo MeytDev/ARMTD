@@ -21,10 +21,16 @@ function safeDiv(a,b){
     return raw * bonusMul;
   }
   function applyMagicDamage(raw, mr, magicPenFlat) {
-    const effMR = (mr - magicPenFlat) * 0.01; // MR etkisi %1'e indirildi
-    const den = effMR + CFG.DEF_K;
-    const red = safeDiv(effMR, den);
-    return raw * (1 - red);
+    const safeRaw = Math.max(0, Number(raw) || 0);
+    const effMR = (Number(mr) - Number(magicPenFlat)) * 0.01; // MR etkisi %1'e indirildi
+    if (effMR >= 0) {
+      const den = effMR + CFG.DEF_K;
+      const red = safeDiv(effMR, den);
+      return safeRaw * Math.max(0, 1 - red);
+    }
+    // Aşırı penetration artık negatif hasar üretemez; negatif direnç fiziksel
+    // hasarla aynı güvenli bonus eğrisini kullanır.
+    return safeRaw * (1 + (-effMR / CFG.DEF_K));
   }
 
   // =========================================================

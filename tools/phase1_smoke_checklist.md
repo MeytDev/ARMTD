@@ -23,6 +23,7 @@
 - [ ] Wave spawn continues normally.
 - [ ] Projectiles still hit and retarget.
 - [ ] Ring effects still apply on-hit behavior.
+- [x] Lightweight FPS counter is visible on both the main menu and during gameplay.
 - [ ] No visible stutter spike introduced by recent changes.
 - [ ] `window.__armtdPerf = true` shows console PERF lines and HUD text.
 
@@ -35,4 +36,5 @@
 ## Audio and Settings
 - [ ] Click/shoot/wave SFX still play.
 - [ ] Mute toggle works from settings and shortcut.
+- [x] Reduced Effects toggle updates immediately and persists after reload.
 - [ ] Keybind changes persist after reload.

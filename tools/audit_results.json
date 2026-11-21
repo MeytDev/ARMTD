@@ -1,0 +1,412 @@
+{
+  "maps": [
+    {
+      "index": 0,
+      "name": "Neo City - S",
+      "pathCells": 33,
+      "uniquePathCells": 33,
+      "archerTutorialBuildable": true,
+      "mageTutorialBuildable": true
+    },
+    {
+      "index": 1,
+      "name": "Xeno",
+      "pathCells": 89,
+      "uniquePathCells": 88,
+      "archerTutorialBuildable": false,
+      "mageTutorialBuildable": false
+    },
+    {
+      "index": 2,
+      "name": "Elixir",
+      "pathCells": 89,
+      "uniquePathCells": 87,
+      "archerTutorialBuildable": true,
+      "mageTutorialBuildable": true
+    },
+    {
+      "index": 3,
+      "name": "Data Rush 2099",
+      "pathCells": 37,
+      "uniquePathCells": 37,
+      "archerTutorialBuildable": true,
+      "mageTutorialBuildable": true
+    },
+    {
+      "index": 4,
+      "name": "Error 404",
+      "pathCells": 70,
+      "uniquePathCells": 68,
+      "archerTutorialBuildable": true,
+      "mageTutorialBuildable": false
+    },
+    {
+      "index": 5,
+      "name": "Zeracrown",
+      "pathCells": 60,
+      "uniquePathCells": 60,
+      "archerTutorialBuildable": true,
+      "mageTutorialBuildable": true
+    },
+    {
+      "index": 6,
+      "name": "Neurovein",
+      "pathCells": 65,
+      "uniquePathCells": 65,
+      "archerTutorialBuildable": true,
+      "mageTutorialBuildable": false
+    },
+    {
+      "index": 7,
+      "name": "Hex Against Four",
+      "pathCells": 132,
+      "uniquePathCells": 132,
+      "archerTutorialBuildable": false,
+      "mageTutorialBuildable": false
+    },
+    {
+      "index": 8,
+      "name": "Synapse Gate",
+      "pathCells": 106,
+      "uniquePathCells": 106,
+      "archerTutorialBuildable": true,
+      "mageTutorialBuildable": true
+    },
+    {
+      "index": 9,
+      "name": "Neuroloom",
+      "pathCells": 80,
+      "uniquePathCells": 78,
+      "archerTutorialBuildable": true,
+      "mageTutorialBuildable": true
+    }
+  ],
+  "zeroExit": {
+    "requested": {
+      "x": 0,
+      "y": 0
+    },
+    "actual": {
+      "x": 3,
+      "y": 3
+    }
+  },
+  "cleanse": {
+    "rootTime": 3,
+    "frostbiteTime": 0,
+    "slow": 0
+  },
+  "dotAtExit": {
+    "dead": true,
+    "reachedExit": true,
+    "coreHP": 24,
+    "gold": 168
+  },
+  "overlappingSave": {
+    "before": {
+      "activeWaves": [
+        1,
+        2
+      ],
+      "enemies": 1
+    },
+    "save": {
+      "resumeWave": 2,
+      "hasEnemies": false,
+      "hasWaves": false
+    },
+    "after": {
+      "activeWaves": [
+        2
+      ],
+      "enemies": 0
+    }
+  },
+  "restartBuff": {
+    "mult": 4,
+    "timeLeft": 10,
+    "maxTime": 10
+  },
+  "attackTiming": [
+    {
+      "fps": 30,
+      "speed": 1,
+      "simulatedSeconds": 10,
+      "shots": 150,
+      "idealShots": 200
+    },
+    {
+      "fps": 30,
+      "speed": 3,
+      "simulatedSeconds": 30,
+      "shots": 300,
+      "idealShots": 600
+    },
+    {
+      "fps": 60,
+      "speed": 1,
+      "simulatedSeconds": 10,
+      "shots": 150,
+      "idealShots": 200
+    },
+    {
+      "fps": 60,
+      "speed": 3,
+      "simulatedSeconds": 30,
+      "shots": 600,
+      "idealShots": 600
+    },
+    {
+      "fps": 144,
+      "speed": 1,
+      "simulatedSeconds": 10,
+      "shots": 180,
+      "idealShots": 200
+    },
+    {
+      "fps": 144,
+      "speed": 3,
+      "simulatedSeconds": 30,
+      "shots": 480,
+      "idealShots": 600
+    }
+  ],
+  "travelTiming": [
+    {
+      "fps": 30,
+      "speed": 1,
+      "pathIndex": 12,
+      "x": 8.5,
+      "y": 3.5
+    },
+    {
+      "fps": 30,
+      "speed": 3,
+      "pathIndex": 30,
+      "x": 18.5,
+      "y": 9.5
+    },
+    {
+      "fps": 60,
+      "speed": 1,
+      "pathIndex": 13,
+      "x": 9.85,
+      "y": 3.5
+    },
+    {
+      "fps": 60,
+      "speed": 3,
+      "pathIndex": 32,
+      "x": 18.5,
+      "y": 7.5
+    },
+    {
+      "fps": 144,
+      "speed": 1,
+      "pathIndex": 13,
+      "x": 10.229,
+      "y": 3.5
+    },
+    {
+      "fps": 144,
+      "speed": 3,
+      "pathIndex": 32,
+      "x": 18.5,
+      "y": 7.5
+    }
+  ],
+  "wavePressure": [
+    {
+      "wave": 99,
+      "count": 70,
+      "nonBossHP": 26803202,
+      "overcap": 3.1,
+      "interval": 0.216
+    },
+    {
+      "wave": 100,
+      "count": 11,
+      "nonBossHP": 1424990,
+      "overcap": 1,
+      "interval": 0.216
+    },
+    {
+      "wave": 101,
+      "count": 70,
+      "nonBossHP": 28024671,
+      "overcap": 3.1,
+      "interval": 0.216
+    },
+    {
+      "wave": 105,
+      "count": 70,
+      "nonBossHP": 32333188,
+      "overcap": 3.1,
+      "interval": 0.216
+    },
+    {
+      "wave": 106,
+      "count": 71,
+      "nonBossHP": 10267782,
+      "overcap": 1,
+      "interval": 0.216
+    },
+    {
+      "wave": 109,
+      "count": 74,
+      "nonBossHP": 11370002,
+      "overcap": 1,
+      "interval": 0.216
+    },
+    {
+      "wave": 110,
+      "count": 12,
+      "nonBossHP": 1856355,
+      "overcap": 1,
+      "interval": 0.216
+    },
+    {
+      "wave": 111,
+      "count": 77,
+      "nonBossHP": 12438290,
+      "overcap": 1,
+      "interval": 0.216
+    },
+    {
+      "wave": 145,
+      "count": 118,
+      "nonBossHP": 37404481,
+      "overcap": 1,
+      "interval": 0.216
+    }
+  ],
+  "earlyIntervals": [
+    {
+      "wave": 1,
+      "seconds": 0.8525000000000001
+    },
+    {
+      "wave": 2,
+      "seconds": 0.8525000000000001
+    },
+    {
+      "wave": 3,
+      "seconds": 0.8525000000000001
+    },
+    {
+      "wave": 4,
+      "seconds": 0.8525000000000001
+    },
+    {
+      "wave": 5,
+      "seconds": 0.8525000000000001
+    },
+    {
+      "wave": 10,
+      "seconds": 0.8525000000000001
+    }
+  ],
+  "magicDamage": [
+    {
+      "raw": 100,
+      "mr": 0,
+      "pen": 0,
+      "result": 100
+    },
+    {
+      "raw": 100,
+      "mr": 0,
+      "pen": 100,
+      "result": 101.69491525423729
+    },
+    {
+      "raw": 100,
+      "mr": 0,
+      "pen": 1000,
+      "result": 120
+    },
+    {
+      "raw": 100,
+      "mr": 0,
+      "pen": 6000,
+      "result": 6000000100
+    },
+    {
+      "raw": 100,
+      "mr": 0,
+      "pen": 6001,
+      "result": -600000.0000001194
+    }
+  ],
+  "peelNoEligibleTarget": {
+    "seconds": 1,
+    "noticeCount": 60,
+    "stillReady": true
+  },
+  "rarity": {
+    "costs": [
+      1,
+      1,
+      2,
+      3,
+      5,
+      8,
+      13,
+      21
+    ],
+    "totalCost": 54,
+    "maxEarnableStars": 50,
+    "level8": [
+      {
+        "id": "common",
+        "label": "Common",
+        "chance": 0,
+        "pct": 0.2
+      },
+      {
+        "id": "uncommon",
+        "label": "Uncommon",
+        "chance": 0,
+        "pct": 0.4
+      },
+      {
+        "id": "rare",
+        "label": "Rare",
+        "chance": 0.30591736675901926,
+        "pct": 0.6
+      },
+      {
+        "id": "epic",
+        "label": "Epic",
+        "chance": 0.5865487041473078,
+        "pct": 0.8
+      },
+      {
+        "id": "legendary",
+        "label": "Legendary",
+        "chance": 0.09775811735788464,
+        "pct": 1
+      },
+      {
+        "id": "mythical",
+        "label": "Mythical Story",
+        "chance": 0.009775811735788464,
+        "pct": 1.2
+      }
+    ]
+  },
+  "poisonRepeatClock": [
+    {
+      "speed": 1,
+      "simulatedSeconds": 3,
+      "realSeconds": 3,
+      "hits": 36
+    },
+    {
+      "speed": 3,
+      "simulatedSeconds": 3,
+      "realSeconds": 1,
+      "hits": 12
+    }
+  ]
+}

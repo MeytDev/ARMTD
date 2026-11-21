@@ -17,7 +17,6 @@ const CFG = {
     LV20_GLOW: "rgba(250,204,21,0.85)",
 
     // Prestige upgrade cost
-    PRESTIGE_UPGRADE_COST_FLAT: 2600,
 
     // Sniper (normal skill artık carepackage)
     SNIPER_CAREPACKAGE_TIME_SEC: 140,

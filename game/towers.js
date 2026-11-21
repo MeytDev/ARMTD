@@ -1,5 +1,5 @@
 ﻿import { CFG } from "./config.js";
-import { clamp, dist2, randInt, now, formatCompact, pickN } from "./utils.js";
+import { clamp, dist2, randInt, random, now, formatCompact, pickN } from "./utils.js";
 import { applyPhysicalDamage, applyMagicDamage } from "./damage.js";
 import {
   acquireFloatingText,
@@ -9,6 +9,9 @@ import {
   acquireFreeProjectile
 } from "./projectiles.js";
 import { SFX } from "./audio.js";
+import {
+  ARCHER_PATHS, ARCHER_SPECIALIZATION_LEVEL, focusBonusPercent, pierceBehind, registerFocusHit
+} from "./archer_specialization.js";
 
 const MILESTONES = new Set([5,10,15,20]);
 
@@ -135,6 +138,36 @@ const MILESTONES = new Set([5,10,15,20]);
     return (18 + lvl * 3.2) * (tLike?.perks?.dmgMul ?? 1);
   }
 
+  const PRESTIGE_DURATION_MULTIPLIERS = Object.freeze({
+    archer: 1.35,
+    mage: 1.80,
+    breaker: 1.45,
+    blizzard: 1.55
+  });
+  const MAGE_PRESTIGE_AURA = Object.freeze({ manaMultiplier: 8.8, rangeBonus: 1.20 });
+
+  function prestigeDurationFor(towerId){
+    const multiplier = PRESTIGE_DURATION_MULTIPLIERS[towerId] ?? 0;
+    return CFG.PRESTIGE_ACTIVE_SEC * multiplier;
+  }
+
+  function magePrestigeAuraProfile(){
+    return MAGE_PRESTIGE_AURA;
+  }
+
+  function sniperCarepackageGoldForWave(waveNum){
+    const wave = Math.max(1, Math.floor(Number(waveNum) || 1));
+    const prestigeMul = Math.max(24, CFG.SNIPER_CAREPACKAGE_PRESTIGE_MULT || 24);
+    const base = CFG.SNIPER_CAREPACKAGE_BASE_GOLD + (wave * CFG.SNIPER_CAREPACKAGE_PER_WAVE);
+    return Math.round(base * prestigeMul);
+  }
+
+  function blizzardPulseMagicDamage(tLike, rollAD = 0){
+    const magic = magicPower(tLike);
+    const dmgMul = tLike?.perks?.dmgMul ?? 1;
+    return (10 + magic * 1.30 + Math.max(0, Number(rollAD) || 0) * 0.35) * dmgMul;
+  }
+
   // =========================================================
   // Tower defs
   //  - Mana/Hit sert nerf (1/3)
@@ -158,46 +191,141 @@ const MODES = {
     random: "Random"
   };
 
-  const SPECIAL_RARITIES = [
-    { id:"common",   label:"Common",        chance:0.499, pct:0.20 },
-    { id:"uncommon", label:"Uncommon",      chance:0.30,  pct:0.40 },
-    { id:"rare",     label:"Rare",          chance:0.13,  pct:0.60 },
-    { id:"epic",     label:"Epic",          chance:0.06,  pct:0.80 },
-    { id:"legendary",label:"Legendary",     chance:0.01,  pct:1.00 },
-    { id:"mythical", label:"Mythical Story",chance:0.001, pct:1.20 }
-  ];
+  const SPECIAL_RARITY_BASE = Object.freeze([
+    Object.freeze({ id:"common",   label:"Common",        chance:0.499, pct:0.20 }),
+    Object.freeze({ id:"uncommon", label:"Uncommon",      chance:0.30,  pct:0.40 }),
+    Object.freeze({ id:"rare",     label:"Rare",          chance:0.13,  pct:0.60 }),
+    Object.freeze({ id:"epic",     label:"Epic",          chance:0.06,  pct:0.80 }),
+    Object.freeze({ id:"legendary",label:"Legendary",     chance:0.01,  pct:1.00 }),
+    Object.freeze({ id:"mythical", label:"Mythical Story",chance:0.001, pct:1.20 })
+  ]);
+  const SPECIAL_RARITY_INDEX_BY_ID = new Map(SPECIAL_RARITY_BASE.map((row, idx) => [row.id, idx]));
+  const SPECIAL_RARITY_SHIFT_BASE_STEP = 0.012;
+  const SPECIAL_RARITY_UPGRADE_MAX_LEVEL = 8;
+  const SPECIAL_RARITY_DONOR_IDS = Object.freeze(["common", "uncommon", "rare", "epic", "legendary"]);
   const SPECIAL_MYTHIC_OTHER_PCT = 1.20;
   let SPECIAL_FORCE_LEGENDARY = false;
-  const SPECIAL_MYTHIC_CHANCE = (SPECIAL_RARITIES.find(r => r.id === "mythical")?.chance) ?? 0;
-  const SPECIAL_EXPECTED_MAG_PCT = SPECIAL_RARITIES.reduce((sum, r) => sum + r.chance * r.pct, 0);
-  const SPECIAL_EXPECTED_MAG_MUL = 1 + SPECIAL_EXPECTED_MAG_PCT; // 1.357
-  const SPECIAL_EXPECTED_OTHER_MAG_MUL = 1 + (SPECIAL_MYTHIC_CHANCE * SPECIAL_MYTHIC_OTHER_PCT); // 1.0012
-  const SPECIAL_FIXED_RARITY_BY_CODE = Object.freeze({
-    mag: SPECIAL_RARITIES.find(r => r.id === "uncommon") || SPECIAL_RARITIES[0],
-    ad: SPECIAL_RARITIES.find(r => r.id === "rare") || SPECIAL_RARITIES[0],
-    as: SPECIAL_RARITIES.find(r => r.id === "epic") || SPECIAL_RARITIES[0]
-  });
+  let SPECIAL_RARITY_UPGRADE_LEVEL = 0;
+
+  function normalizeSpecialRarityUpgradeLevel(level){
+    return Math.min(
+      SPECIAL_RARITY_UPGRADE_MAX_LEVEL,
+      Math.max(0, Math.floor(Number(level) || 0))
+    );
+  }
+
+  function rarityUpgradeBudgetForLevel(level){
+    const lv = normalizeSpecialRarityUpgradeLevel(level);
+    const safeLv = Math.min(32, lv);
+    const geometricScale = Math.max(0, Math.pow(2, safeLv) - 1);
+    return Math.max(0, SPECIAL_RARITY_SHIFT_BASE_STEP * geometricScale);
+  }
+
+  function distributeFromDonorToHigher(out, donorIdx, amount){
+    if (!Number.isFinite(amount) || amount <= 0) return;
+    let receiverBaseTotal = 0;
+    for (let i = donorIdx + 1; i < out.length; i += 1) {
+      receiverBaseTotal += Math.max(0, SPECIAL_RARITY_BASE[i]?.chance ?? 0);
+    }
+    if (receiverBaseTotal <= 0) return;
+    for (let i = donorIdx + 1; i < out.length; i += 1) {
+      const baseChance = Math.max(0, SPECIAL_RARITY_BASE[i]?.chance ?? 0);
+      if (baseChance <= 0) continue;
+      out[i].chance += amount * (baseChance / receiverBaseTotal);
+    }
+  }
+
+  function buildSpecialRaritiesForLevel(level = SPECIAL_RARITY_UPGRADE_LEVEL){
+    const out = SPECIAL_RARITY_BASE.map((row) => ({ ...row }));
+    let carryBudget = rarityUpgradeBudgetForLevel(level);
+
+    for (let donorStep = 0; donorStep < SPECIAL_RARITY_DONOR_IDS.length; donorStep += 1) {
+      if (carryBudget <= 1e-10) break;
+      if (donorStep > 0) carryBudget *= 0.5;
+      if (carryBudget <= 1e-10) break;
+
+      const donorId = SPECIAL_RARITY_DONOR_IDS[donorStep];
+      const donorIdx = SPECIAL_RARITY_INDEX_BY_ID.get(donorId);
+      if (!Number.isInteger(donorIdx)) continue;
+
+      const available = Math.max(0, out[donorIdx]?.chance ?? 0);
+      if (available <= 0) continue;
+
+      const taken = Math.min(available, carryBudget);
+      out[donorIdx].chance = Math.max(0, available - taken);
+      distributeFromDonorToHigher(out, donorIdx, taken);
+      carryBudget -= taken;
+    }
+
+    const total = out.reduce((sum, row) => sum + row.chance, 0);
+    if (total > 0) {
+      const inv = 1 / total;
+      for (const row of out) row.chance *= inv;
+    }
+    return out;
+  }
+
+  function getSpecialRarityById(id){
+    const list = buildSpecialRaritiesForLevel();
+    return list.find((row) => row.id === id) || list[0];
+  }
+
+  function getSpecialExpectedMagicMultipliers(){
+    const list = buildSpecialRaritiesForLevel();
+    const mythicChance = (list.find((row) => row.id === "mythical")?.chance) ?? 0;
+    const expectedMagPct = list.reduce((sum, row) => sum + row.chance * row.pct, 0);
+    return {
+      magMul: 1 + expectedMagPct,
+      otherMagMul: 1 + (mythicChance * SPECIAL_MYTHIC_OTHER_PCT)
+    };
+  }
+
+  function getFixedRarityByCode(code){
+    if (code === "mag") return getSpecialRarityById("uncommon");
+    if (code === "ad") return getSpecialRarityById("rare");
+    if (code === "as") return getSpecialRarityById("epic");
+    const list = buildSpecialRaritiesForLevel();
+    return list[0];
+  }
 
   function rollSpecialRarity(){
     if (SPECIAL_FORCE_LEGENDARY) {
-      return SPECIAL_RARITIES.find(r => r.id === "legendary") || SPECIAL_RARITIES[0];
+      return getSpecialRarityById("legendary");
     }
-    const r = Math.random();
+    const list = buildSpecialRaritiesForLevel();
+    const r = random();
     let acc = 0;
-    for (const rarity of SPECIAL_RARITIES) {
+    for (const rarity of list) {
       acc += rarity.chance;
       if (r <= acc) return rarity;
     }
-    return SPECIAL_RARITIES[0];
+    return list[0];
   }
 
   function setSpecialLegendaryMode(enabled){
     SPECIAL_FORCE_LEGENDARY = !!enabled;
   }
 
+  function setSpecialRarityUpgradeLevel(level){
+    SPECIAL_RARITY_UPGRADE_LEVEL = normalizeSpecialRarityUpgradeLevel(level);
+  }
+
+  function getSpecialRarityUpgradeLevel(){
+    return SPECIAL_RARITY_UPGRADE_LEVEL;
+  }
+
+  function getSpecialRarityTable(){
+    return buildSpecialRaritiesForLevel().map((row) => ({ ...row }));
+  }
+
+  function getSpecialRarityTableAtLevel(level){
+    return buildSpecialRaritiesForLevel(level).map((row) => ({ ...row }));
+  }
+
   function buildChoicesForTower(tower, tier, options = {}){
     const stats = ["ad","as","mag"];
     const forceFixedByCode = !!options.forceFixedByCode;
+    const expectedMuls = getSpecialExpectedMagicMultipliers();
 
     const spec = {
       ad:  { short:"AD",  label:"Attack Damage", desc:"Increases attack damage and hit power.", apply:(t,p)=>{ t.perks.adMul *= (1+p); } },
@@ -207,7 +335,7 @@ const MODES = {
 
     return stats.map(code => {
       const rarity = forceFixedByCode
-        ? (SPECIAL_FIXED_RARITY_BY_CODE[code] || rollSpecialRarity())
+        ? getFixedRarityByCode(code)
         : rollSpecialRarity();
       const stat = spec[code];
 
@@ -229,10 +357,10 @@ const MODES = {
             if (code !== "as") t.perks.asMul *= (1 + SPECIAL_MYTHIC_OTHER_PCT);
             if (code === "mag") {
               t.specialMagicActualMul *= (1 + rarity.pct);
-              t.specialMagicExpectedMul *= SPECIAL_EXPECTED_MAG_MUL;
+              t.specialMagicExpectedMul *= expectedMuls.magMul;
             } else {
               t.specialMagicActualMul *= (1 + SPECIAL_MYTHIC_OTHER_PCT);
-              t.specialMagicExpectedMul *= SPECIAL_EXPECTED_OTHER_MAG_MUL;
+              t.specialMagicExpectedMul *= expectedMuls.otherMagMul;
             }
             if (!t.specialUpgrades) t.specialUpgrades = [];
             t.specialUpgrades = t.specialUpgrades.filter(u => u.tier !== tier);
@@ -252,9 +380,9 @@ const MODES = {
           stat.apply(t, rarity.pct);
           if (code === "mag") {
             t.specialMagicActualMul *= (1 + rarity.pct);
-            t.specialMagicExpectedMul *= SPECIAL_EXPECTED_MAG_MUL;
+            t.specialMagicExpectedMul *= expectedMuls.magMul;
           } else {
-            t.specialMagicExpectedMul *= SPECIAL_EXPECTED_OTHER_MAG_MUL;
+            t.specialMagicExpectedMul *= expectedMuls.otherMagMul;
           }
           if (!t.specialUpgrades) t.specialUpgrades = [];
           t.specialUpgrades = t.specialUpgrades.filter(u => u.tier !== tier);
@@ -374,14 +502,18 @@ const TOWER_DEFS = [
       },
       projectile: { speedTilesPerSec: CFG.PEEL_PROJECTILE_SPEED },
       prestige: { mana: 1000, name: "Linkforge",
-        desc: "Randomly grants +1 level to one other prestige tower (can exceed 21)."
+        desc: "Randomly grants +1 level to up to 2 other prestige towers (can exceed Level 21)."
       }
     },
     {
       id: "archer",
       name: "Archer Tower",
       cost: 60,
-      autoAttackDesc: "Fast physical single-target shots.",
+      autoAttackDesc: (tower) => {
+        const path = ARCHER_PATHS[tower.archerSpecialization];
+        return path ? `${path.name}. ${path.description}` :
+          `Fast single-target shots. Choose a permanent specialization at level ${ARCHER_SPECIALIZATION_LEVEL}.`;
+      },
       skillName: "Power Shot",
       skillManaCost: 30,
       behavior: "projectile",
@@ -405,7 +537,7 @@ const TOWER_DEFS = [
       projectile: { speedTilesPerSec: 8.8 },
 
       prestige: { mana: 300, name: "Rapid Volley",
-        desc: "For 12s, all Archer Towers on the map gain Attack Speed x4."
+        desc: () => `For ${prestigeDurationFor("archer").toFixed(1)}s, all Archer Towers on the map gain Attack Speed x5.20.`
       }
     },
     {
@@ -445,7 +577,10 @@ const TOWER_DEFS = [
       projectile: { speedTilesPerSec: 7.2 },
 
       prestige: { mana: 400, name: "Arcstorm",
-        desc: "For a fixed duration, nearby towers gain a strong mana generation aura."
+        desc: () => {
+          const aura = magePrestigeAuraProfile();
+          return `For ${prestigeDurationFor("mage").toFixed(1)}s, other nearby towers gain Mana x${aura.manaMultiplier.toFixed(2)}. Mage no longer auto-attacks after Prestige.`;
+        }
       }
     },
     {
@@ -476,7 +611,7 @@ const TOWER_DEFS = [
       projectile: { speedTilesPerSec: 7.4 },
 
       prestige: { mana: 500, name: "Shatter Field",
-        desc: "For 12s, each attack hits all enemies in range. Armor can go negative (they take extra damage)."
+        desc: () => `For ${prestigeDurationFor("breaker").toFixed(1)}s, each attack hits all enemies in range for x1.45 damage.`
       }
     },
     {
@@ -503,13 +638,13 @@ const TOWER_DEFS = [
       skillDesc: (tLike) => {
         const p = blizzardSlowProfile(tLike);
         const magic = magicPower(tLike);
-        const pulseMagicDamage = (10 + magic * 1.30) * (tLike?.perks?.dmgMul ?? 1);
+        const pulseMagicDamage = blizzardPulseMagicDamage(tLike);
         return `Emits a Frost Pulse: ${Math.round(p.slowPct*100)}% slow for ${p.duration.toFixed(2)}s and ${Math.round(pulseMagicDamage)} magic damage.`;
       },
       projectile: { speedTilesPerSec: 6.9 },
 
       prestige: { mana: 600, name: "Frostbite",
-        desc: "Roots one enemy in ice for 3.0s and applies a heavy Frostbite DOT."
+        desc: () => `For ${prestigeDurationFor("blizzard").toFixed(1)}s, each Frost Pulse roots one unfrozen enemy for 3.0s and applies Frostbite DOT.`
       }
     },
     {
@@ -539,7 +674,7 @@ const TOWER_DEFS = [
       projectile: { speedTilesPerSec: 7.6 },
 
       prestige: { mana: 800, name: "Plague Bomb",
-        desc: "Launches a giant Plague Bomb that aggressively multiplies poison across clustered enemies."
+        desc: "Launches a bomb and passing projectile that multiply existing Poison x3.60; unpoisoned enemies receive new Poison and magic damage."
       }
     },
     {
@@ -568,7 +703,10 @@ const TOWER_DEFS = [
       projectile: { speedTilesPerSec: 12.5 },
 
       prestige: { mana: 1000, name: "Carepackage",
-        desc: "Prestige trigger grants a massive Carepackage gold payout."
+        desc: (tLike) => {
+          const wave = Math.max(1, Math.floor(Number(tLike?.game?.currentWave ?? tLike?.currentWave) || 1));
+          return `Instantly grants ${formatCompact(sniperCarepackageGoldForWave(wave))} Gold at Wave ${wave}.`;
+        }
       }
     }
   ];
@@ -613,6 +751,7 @@ class Tower {
       this.prestigeMaxMana = def.prestige?.mana ?? 0;
       this.prestigeMana = 0;
       this.prestigeActive = 0; // remaining seconds
+      this.prestigeRetryCooldown = 0;
 
       // Archer prestige: temporary AS buff
       this.tempASMul = 1;
@@ -627,6 +766,11 @@ class Tower {
       // Targeting
       this.targetMode = "first";
       this.lockedTarget = null;
+      if (def.id === "archer") {
+        this.archerSpecialization = null;
+        this.focusTarget = null;
+        this.focusStacks = 0;
+      }
 
       // Sniper: unlimited secondary level for normal skill overlevel
       this.secondaryLevel = 0;
@@ -651,6 +795,14 @@ class Tower {
     }
 
     isPrestige(){ return this.level >= CFG.PRESTIGE_LEVEL; }
+    canChooseArcherPath(){
+      return this.def.id === "archer" && this.level >= ARCHER_SPECIALIZATION_LEVEL && !this.archerSpecialization;
+    }
+    chooseArcherPath(id){
+      if (!this.canChooseArcherPath() || typeof id !== "string" || !Object.hasOwn(ARCHER_PATHS, id)) return false;
+      this.archerSpecialization = id;
+      return true;
+    }
     maxNormalLevel(){ return CFG.TOWER_MAX_LEVEL; }
 
     peelMul(kind){
@@ -669,13 +821,20 @@ class Tower {
         existing.mul = mul;
         existing.power = power;
         existing.source = source || existing.source;
+        if (this.game?.runStats) {
+          this.game.runStats.supportBuffEvents += 1;
+        }
         return;
       }
       this.peelBuffs[kind] = { time: duration, maxTime: duration, mul, power, source };
+      if (this.game?.runStats) {
+        this.game.runStats.supportBuffEvents += 1;
+      }
     }
     updatePeelBuffs(dt){
       if (!this.peelBuffs) return;
       for (const [key, buff] of Object.entries(this.peelBuffs)) {
+        if (this.game?.runStats) this.game.runStats.supportBuffSeconds += Math.min(Math.max(0, dt), Math.max(0, buff.time));
         buff.time -= dt;
         if (buff.time <= 0) delete this.peelBuffs[key];
       }
@@ -750,6 +909,9 @@ class Tower {
         this.forceChainAll = false;
         this.cleaveAll = false;
         applyUpgradeGain(this, g);
+        if (typeof this.game?.evaluateNoPrestigeChallenge === "function") {
+          this.game.evaluateNoPrestigeChallenge();
+        }
         this.game.refreshUI(true);
         return;
       }
@@ -759,6 +921,9 @@ class Tower {
 
       const g = scaledGain(lvlBefore);
       applyUpgradeGain(this, g);
+      if (typeof this.game?.evaluateNoPrestigeChallenge === "function") {
+        this.game.evaluateNoPrestigeChallenge();
+      }
     }
 
     applySecondaryLevelGain(){
@@ -803,7 +968,7 @@ class Tower {
 
       const dealtPhys = applyPhysicalDamage(phys, enemy.armor, this.armorPenPct);
       const dealtMag = applyMagicDamage(mag, enemy.mr, this.magicPenFlat);
-      return dealtPhys + dealtMag;
+      return (dealtPhys + dealtMag) * (enemy.damageTakenMultiplier ?? 1);
     }
 
     getTargetModeLabel(){
@@ -875,7 +1040,7 @@ class Tower {
       const r2=this.range*this.range;
       const mode = this.targetMode || "first";
 
-      if (mode !== "pure" && this.isValidTarget(this.lockedTarget, r2)) {
+      if (mode !== "pure" && mode !== "first" && this.isValidTarget(this.lockedTarget, r2)) {
         return this.lockedTarget;
       }
       if (mode !== "pure") this.lockedTarget = null;
@@ -911,7 +1076,7 @@ class Tower {
           if (!picked || e.hp > picked.hp) picked = e;
         }
       } else if (mode === "random") {
-        picked = candidates[Math.floor(Math.random() * candidates.length)] || null;
+        picked = candidates[Math.floor(random() * candidates.length)] || null;
       } else if (mode === "pure") {
         let bestScore = -Infinity;
         for (const e of candidates) {
@@ -930,7 +1095,7 @@ class Tower {
         picked = pickByPath(false);
       }
 
-      if (mode !== "pure") this.lockedTarget = picked || null;
+      if (mode !== "pure" && mode !== "first") this.lockedTarget = picked || null;
       return picked;
     }
 
@@ -952,7 +1117,10 @@ class Tower {
 
       let candidates = [];
       const peelRange2 = this.range * this.range;
-      for (const t of game.towers) {
+      const nearbyTowers = firstHop && typeof game.getTowersInRange === "function"
+        ? game.getTowersInRange(this.x, this.y, this.range)
+        : game.towers;
+      for (const t of nearbyTowers) {
         if (t === fromTower) continue;
         if (t === this) continue; // self only via forced final hop
         if (hitSet?.has(t)) continue;
@@ -975,13 +1143,13 @@ class Tower {
       if (!pool.length) pool = candidates;
       let bestD2 = Math.min(...pool.map(c => c.d2));
       const ties = pool.filter(c => Math.abs(c.d2 - bestD2) <= 1e-7).map(c => c.tower);
-      return ties[Math.floor(Math.random() * ties.length)] || null;
+      return ties[Math.floor(random() * ties.length)] || null;
     }
 
     supportShoot(game){
       const buffTypes = ["ad","as","rng","mag"];
       const skillReady = (this.maxMana > 0 && this.mana >= this.maxMana);
-      const buffType = buffTypes[Math.floor(Math.random() * buffTypes.length)];
+      const buffType = buffTypes[Math.floor(random() * buffTypes.length)];
 
       const bounce = this.getBounceCount();
       if (bounce <= 0) return;
@@ -1093,8 +1261,13 @@ class Tower {
     }
 
     update(dt, game){
+      if (this.focusTarget && (this.focusTarget.dead || this.focusTarget.reachedExit)) {
+        this.focusTarget = null;
+        this.focusStacks = 0;
+      }
       // Prestige mana: süreyle dolar
       if (this.isPrestige()) {
+        this.prestigeRetryCooldown = Math.max(0, this.prestigeRetryCooldown - dt);
         const gainMult = this._manaGainTempMul || 1;
         const fillPerSec = (this.prestigeMaxMana / CFG.PRESTIGE_RECHARGE_TIME_SEC) * gainMult;
         this.prestigeMana = clamp(this.prestigeMana + fillPerSec * dt, 0, this.prestigeMaxMana);
@@ -1114,7 +1287,7 @@ class Tower {
         const ready = this.prestigeMana >= this.prestigeMaxMana;
         if (ready) {
           const canCastNow = this.usesTimedPrestige() ? (this.prestigeActive === 0) : true;
-          if (canCastNow) {
+          if (canCastNow && this.prestigeRetryCooldown <= 0) {
             const casted = this.triggerPrestige(game);
             if (casted) this.prestigeMana = 0;
           }
@@ -1131,17 +1304,24 @@ class Tower {
       this.updatePeelBuffs(dt);
 
       if(this.cooldown>0) this.cooldown -= dt;
-      if(this.cooldown>0) return;
+      if (Math.abs(this.cooldown) <= 1e-9) this.cooldown = 0;
+      let attacksThisUpdate = 0;
+      const maxAttacksPerUpdate = 64;
+      const consumeCooldown = () => {
+        this.cooldown += 1 / Math.max(0.001, this.AS);
+        attacksThisUpdate += 1;
+      };
 
-      if (this.def.behavior === "support") {
-        this.supportShoot(game);
-        this.cooldown = 1/this.AS;
-        return;
-      }
+      while(this.cooldown <= 1e-9 && attacksThisUpdate < maxAttacksPerUpdate){
+        if (this.def.behavior === "support") {
+          this.supportShoot(game);
+          consumeCooldown();
+          continue;
+        }
 
-      if(this.def.behavior==="pulse"){
-        const pulseRes = this.def.pulse ? this.def.pulse(this) : null;
-        if(!pulseRes){ this.cooldown = 1/this.AS; return; }
+        if(this.def.behavior==="pulse"){
+          const pulseRes = this.def.pulse ? this.def.pulse(this) : null;
+          if(!pulseRes){ consumeCooldown(); continue; }
 
         if (this.def.id === "blizzard" && this.prestigeActive > 0) {
           const r2 = this.range * this.range;
@@ -1174,30 +1354,42 @@ class Tower {
 
         makeRing();
 
-        this.cooldown = 1/this.AS;
-        return;
-      }
+          consumeCooldown();
+          continue;
+        }
 
       // Breaker prestige: cleave (her atakta tüm düşmanlara vur)
-      if (this.cleaveAll) {
-        this.cleaveShootAll(game);
-        this.cooldown = 1/this.AS;
-        return;
+        if (this.cleaveAll) {
+          this.cleaveShootAll(game);
+          consumeCooldown();
+          continue;
+        }
+
+        if (this.def.id === "mage" && this.isPrestige()) {
+          consumeCooldown();
+          continue;
+        }
+
+        const target=this.chooseTarget(game);
+        if(!target) {
+          this.cooldown = 0;
+          break;
+        }
+
+        this.shoot(target, game);
+        consumeCooldown();
       }
-
-      if (this.def.id === "mage" && this.isPrestige()) {
-        this.cooldown = 1/this.AS;
-        return;
-      }
-
-      const target=this.chooseTarget(game);
-      if(!target) return;
-
-      this.shoot(target, game);
-      this.cooldown = 1/this.AS;
     }
 
     triggerPrestige(game){
+      let peelCandidates = null;
+      if (this.def.id === "peel") {
+        peelCandidates = game?.towers?.filter(t => t !== this && t.level >= CFG.PRESTIGE_LEVEL) || [];
+        if (!peelCandidates.length) {
+          this.prestigeRetryCooldown = 0.5;
+          return false;
+        }
+      }
       if (this.usesTimedPrestige()) this.prestigeActive = CFG.PRESTIGE_ACTIVE_SEC;
       else this.prestigeActive = 0;
       SFX.prestige();
@@ -1208,37 +1400,33 @@ class Tower {
       }
 
       if (this.def.id === "archer") {
-        this.prestigeActive = CFG.PRESTIGE_ACTIVE_SEC * 1.35;
+        this.prestigeActive = prestigeDurationFor("archer");
         this.tempASMul = 5.2;
         return true;
       }
 
       if (this.def.id === "mage") {
         this.forceChainAll = false;
-        this.prestigeActive = CFG.PRESTIGE_ACTIVE_SEC * 1.80;
+        this.prestigeActive = prestigeDurationFor("mage");
         return true;
       }
 
       if (this.def.id === "breaker") {
-        this.prestigeActive = CFG.PRESTIGE_ACTIVE_SEC * 1.45;
+        this.prestigeActive = prestigeDurationFor("breaker");
         this.cleaveAll = true;
         this.prestigeDamageMul = 1.45;
         return true;
       }
 
       if (this.def.id === "peel") {
-        const candidates = game.towers.filter(t => t !== this && t.level >= CFG.PRESTIGE_LEVEL);
-        if (!candidates.length) {
-          return false;
-        }
-        const picks = pickN(candidates, Math.min(2, candidates.length));
+        const picks = pickN(peelCandidates, Math.min(2, peelCandidates.length));
         for (const pick of picks) pick.upgradeBaseStats(true);
         game.floaters.push(acquireFloatingText(this.x, this.y - 0.70, `LINKFORGE +${picks.length}`, 0.95, 16, false, false));
         return true;
       }
 
       if (this.def.id === "blizzard") {
-        this.prestigeActive = CFG.PRESTIGE_ACTIVE_SEC * 1.55;
+        this.prestigeActive = prestigeDurationFor("blizzard");
         return true;
       }
 
@@ -1248,10 +1436,9 @@ class Tower {
       }
 
       if (this.def.id === "sniper") {
-        const prestigeMul = Math.max(24, CFG.SNIPER_CAREPACKAGE_PRESTIGE_MULT || 24);
-        const base = CFG.SNIPER_CAREPACKAGE_BASE_GOLD + (game.currentWave * CFG.SNIPER_CAREPACKAGE_PER_WAVE);
-        const gold = Math.round(base * prestigeMul);
+        const gold = sniperCarepackageGoldForWave(game.currentWave);
         game.gold += gold;
+        if (game.runStats) game.runStats.supportGold += Math.max(0, gold);
         this.prestigeGoldTotal = Math.max(0, this.prestigeGoldTotal + gold);
         game.floaters.push(acquireFloatingText(game.map.exit.x+0.5, game.map.exit.y+0.5, `📦 +${formatCompact(gold)}`, 1.1, 20, false, false));
         if (typeof game.showCarepackageNotice === "function") game.showCarepackageNotice(this, gold);
@@ -1264,7 +1451,10 @@ class Tower {
     cleaveShootAll(game){
       const r2=this.range*this.range;
       const targets = [];
-      for (const e of game.enemies) {
+      const nearby = (typeof game.getEnemiesInRange === "function")
+        ? game.getEnemiesInRange(this.x, this.y, this.range)
+        : game.enemies;
+      for (const e of nearby) {
         if (e.dead || e.reachedExit) continue;
         if (dist2(this.x,this.y,e.x,e.y) <= r2) targets.push(e);
       }
@@ -1349,7 +1539,7 @@ class Tower {
         mag *= this.prestigeDamageMul;
       }
 
-      const isCrit = Math.random() < this.critChance;
+        const isCrit = random() < this.critChance;
       this._lastShotWasCrit = isCrit;
       if(isCrit){ phys *= this.critDmg; mag *= this.critDmg; }
 
@@ -1418,12 +1608,13 @@ class Tower {
         const projSpeed = (this.def.id === "sniper")
           ? Math.max(40, this.getProjectileSpeed() * 6.5)
           : this.getProjectileSpeed();
-        const expected = this.expectedDamageAgainst(target);
+        const expected = this.expectedDamageAgainst(target) * (1 + focusBonusPercent(this, target) / 100);
         const floatColor = (this.def.id === "archer" && skillResLocal?.kind === "powershot")
           ? "rgba(96,165,250,0.98)"
           : null;
 
         const payload = {
+          isCrit,
           physRaw: pPhys,
           magicRaw: pMag,
           armorPenPct: this.armorPenPct,
@@ -1510,7 +1701,10 @@ class Tower {
 
                 let next = null;
                 let bestD2 = Infinity;
-                for (const e of game.enemies) {
+                const nearby = (typeof game.getEnemiesInRange === "function")
+                  ? game.getEnemiesInRange(current.x, current.y, radiusTiles)
+                  : game.enemies;
+                for (const e of nearby) {
                   if (e.dead || e.reachedExit || e === current || hitSet.has(e)) continue;
                   const d2 = dist2(current.x, current.y, e.x, e.y);
                   if (d2 <= rr2 && d2 < bestD2) {
@@ -1526,7 +1720,7 @@ class Tower {
                 next.applySlow(0.18, 0.45, srcTower);
 
                 let rawMag = chainRawMag;
-                const vulnMul = next._blizVulnMul || 1;
+                const vulnMul = next.damageTakenMultiplier ?? 1;
                 const predicted = applyMagicDamage(rawMag, next.mr, this.magicPenFlat) * vulnMul;
                 if (predicted > prevDealtCap && predicted > 0) {
                   rawMag *= (prevDealtCap / predicted);
@@ -1554,6 +1748,12 @@ class Tower {
           }
         };
 
+        if (this.archerSpecialization === "pierce") {
+          payload.onHit = (primary, g) => pierceBehind(this, primary, g, payload);
+        } else if (this.archerSpecialization === "focus") {
+          payload.hitMultiplier = (hit) => registerFocusHit(this, hit);
+        }
+
         if (skillResLocal?.kind === "frostPulse") {
           game.rings.push(acquireEffectRing(
             this.x, this.y,
@@ -1564,9 +1764,8 @@ class Tower {
             (e)=> {
               e.applySlow(skillResLocal.slowPct, skillResLocal.duration, this);
               const rollAD = randInt(this.AD[0], this.AD[1]) * this.perks.adMul * this.peelMul("ad");
-              const basePulseMagic = (10 + magicPower(this) * 1.30) * this.perks.magMul * this.peelMul("mag");
-              let pulseMag = (basePulseMagic + rollAD * 0.35) * this.perks.dmgMul;
-              const pulseCrit = Math.random() < this.critChance;
+              let pulseMag = blizzardPulseMagicDamage(this, rollAD);
+              const pulseCrit = random() < this.critChance;
               if (pulseCrit) pulseMag *= this.critDmg;
               this._lastShotWasCrit = pulseCrit;
               const d = e.takeDamage(0, pulseMag, this.armorPenPct, this.magicPenFlat, this, true);
@@ -1576,6 +1775,9 @@ class Tower {
           ));
         }
 
+        if (typeof game.spawnAttackFlash === "function") {
+          game.spawnAttackFlash(this, target, visual, this._lastShotWasCrit);
+        }
         game.projectiles.push(acquireProjectile(this.x, this.y, target, projSpeed, payload, visual, expected, this));
       };
 
@@ -1595,12 +1797,21 @@ export {
   tierMagicPct,
   peelBuffPower,
   peelBounceCountFromAD,
+  blizzardPulseMagicDamage,
+  prestigeDurationFor,
+  magePrestigeAuraProfile,
+  sniperCarepackageGoldForWave,
   poisonSkillMultiplier,
   sniperOverlevelPct,
   sniperSecondaryScaledGain,
   MODES,
   buildChoicesForTower,
   setSpecialLegendaryMode,
+  setSpecialRarityUpgradeLevel,
+  getSpecialRarityUpgradeLevel,
+  getSpecialRarityTable,
+  getSpecialRarityTableAtLevel,
+  SPECIAL_RARITY_UPGRADE_MAX_LEVEL,
   gainCurve,
   scaledGain,
   upgradeCostCurve,
